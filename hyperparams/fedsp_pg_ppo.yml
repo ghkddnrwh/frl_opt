@@ -1,0 +1,64 @@
+# Pendulum-v1:
+#   n_timesteps: !!float 100000
+
+#   # Federated parameters
+#   num_clients: 4
+#   local_steps: 2048
+#   server_update_weight: 1.0
+#   dual_lr: 0.05
+
+#   policy: "MlpPolicy"
+#   n_envs: 1
+#   n_steps: 1024
+#   batch_size: 64
+#   gae_lambda: 0.95
+#   gamma: 0.99
+#   n_epochs: 10
+#   ent_coef: 0.0
+#   learning_rate: !!float 3e-4
+#   clip_range: 0.2
+#   vf_coef: 0.5
+#   max_grad_norm: 0.5
+#   use_sde: False
+
+#   # Evaluation
+#   eval_local_episodes: 10
+#   eval_nominal_episodes: 10
+#   eval_round_freq: 1
+#   eval_deterministic: True
+
+PerturbPendulum-v1:
+  n_timesteps: !!float 200000
+
+  # Federated parameters
+  num_clients: 5
+  local_steps: 256
+  server_update_weight: 1.0
+  dual_lr: 0.05
+
+  batch_size: 16
+  n_envs: 1
+  policy: "MlpPolicy"
+  n_steps: 1024
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 3e-4
+  clip_range: 0.2
+  # vf_coef: 0.5
+  # max_grad_norm: 0.5
+  # use_sde: False
+
+  use_sde: True
+  sde_sample_freq: 4
+
+  # Heterogeneous local environments
+  perturb_noise_type: "mass"
+  perturb_noise_range: 0.5
+
+  # Evaluation
+  eval_local_episodes: 10
+  eval_nominal_episodes: 10
+  eval_round_freq: 1
+  eval_deterministic: True

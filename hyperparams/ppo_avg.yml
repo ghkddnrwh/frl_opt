@@ -1,0 +1,72 @@
+# Hyperparameters for federated PPO averaging (PPOAvg)
+#
+# Notes:
+# - The PPO-specific parameters below are standard RL Zoo / SB3 PPO settings.
+# - The FRL-specific parameters are:
+#     num_clients
+#     local_steps
+#     server_update_weight
+#     perturb_noise_type
+#     perturb_noise_range
+#     eval_local_episodes
+#     eval_nominal_episodes
+#     eval_round_freq
+#     eval_deterministic
+# - For on-policy PPO, it is usually best to choose local_steps as a multiple of
+#   (n_steps * n_envs), or at least not much smaller than that rollout size.
+
+PerturbPendulum-v1:
+  # Federated parameters
+  n_timesteps: !!float 100000
+  num_clients: 5
+  local_steps: 256
+  server_update_weight: 1.0
+
+  batch_size: 16
+  n_envs: 1
+  policy: "MlpPolicy"
+  n_steps: 1024
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+  # Evaluation
+  eval_local_episodes: 10
+  eval_nominal_episodes: 10
+  eval_round_freq: 1
+  eval_deterministic: True
+
+# PerturbPendulum-v1:
+#   n_envs: 1
+#   n_timesteps: !!float 100000
+#   policy: "MlpPolicy"
+#   n_steps: 1024
+#   batch_size: 256
+#   gae_lambda: 0.95
+#   gamma: 0.9
+#   n_epochs: 10
+#   ent_coef: 0.0
+#   learning_rate: !!float 1e-3
+#   clip_range: 0.2
+#   use_sde: True
+#   sde_sample_freq: 4
+
+#   # Federated parameters
+#   num_clients: 4
+#   local_steps: 2048
+#   server_update_weight: 1.0
+
+#   # Heterogeneous perturbation parameters
+#   perturb_noise_type: "mass"
+#   perturb_noise_range: 0.5
+
+#   # Evaluation
+#   eval_local_episodes: 10
+#   eval_nominal_episodes: 10
+#   eval_round_freq: 1
+#   eval_deterministic: True

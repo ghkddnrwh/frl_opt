@@ -1,5 +1,7 @@
 __pycache__/
 logs
+plogs/
+plogs
 .pytest_cache/
 .coverage
 .coverage.*

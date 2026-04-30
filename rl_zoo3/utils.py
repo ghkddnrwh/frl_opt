@@ -21,6 +21,13 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.sb2_compat.rmsprop_tf_like import RMSpropTFLike  # noqa: F401
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv, VecFrameStack, VecNormalize
 
+import rl_zoo3.register
+
+from rl_zoo3.federate.buff.buff.td3_avg import TD3Avg
+from rl_zoo3.federate.ppo_avg.ppo_avg import PPOAvg
+
+from rl_zoo3.federate.fedsp_pg.fedsp_pg_ppo import FedSPPGPPO
+
 # For custom activation fn
 from torch import nn as nn
 
@@ -38,6 +45,11 @@ ALGOS: dict[str, type[BaseAlgorithm]] = {
     "tqc": TQC,
     "trpo": TRPO,
     "ppo_lstm": RecurrentPPO,
+
+    "td3_avg": TD3Avg,
+    "ppo_avg": PPOAvg,
+
+    "fedsp_pg_ppo": FedSPPGPPO,
 }
 
 
