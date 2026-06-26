@@ -18,34 +18,7 @@ atari:
   vf_coef: 0.5
   ent_coef: 0.01
 
-# Tuned
-Pendulum-v1:
-  n_envs: 4
-  n_timesteps: !!float 1e5
-  policy: 'MlpPolicy'
-  n_steps: 1024
-  gae_lambda: 0.95
-  gamma: 0.9
-  n_epochs: 10
-  ent_coef: 0.0
-  learning_rate: !!float 1e-3
-  clip_range: 0.2
-  use_sde: True
-  sde_sample_freq: 4
 
-# Tuned
-CartPole-v1:
-  n_envs: 8
-  n_timesteps: !!float 1e5
-  policy: 'MlpPolicy'
-  n_steps: 32
-  batch_size: 256
-  gae_lambda: 0.8
-  gamma: 0.98
-  n_epochs: 20
-  ent_coef: 0.0
-  learning_rate: lin_0.001
-  clip_range: lin_0.2
 
 MountainCar-v0:
   normalize: true
@@ -77,16 +50,7 @@ MountainCarContinuous-v0:
   use_sde: True
   policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
 
-Acrobot-v1:
-  normalize: true
-  n_envs: 16
-  n_timesteps: !!float 1e6
-  policy: 'MlpPolicy'
-  n_steps: 256
-  gae_lambda: 0.94
-  gamma: 0.99
-  n_epochs: 4
-  ent_coef: 0.0
+
 
 BipedalWalker-v3:
   normalize: true
@@ -463,7 +427,7 @@ Hopper-v4:
   n_timesteps: !!float 1e6
   batch_size: 32
   n_steps: 512
-  gamma: 0.999
+  gamma: 0.99
   learning_rate: 9.80828e-05
   ent_coef: 0.00229519
   clip_range: 0.2
@@ -585,3 +549,128 @@ Walker2d-v4:
   gae_lambda: 0.95
   max_grad_norm: 1
   vf_coef: 0.871923
+
+
+####################################################################################
+### Utilized 
+#################################################################################### 
+
+# Tuned
+Pendulum-v1:
+  n_envs: 4
+  n_timesteps: !!float 1e5
+  policy: 'MlpPolicy'
+  n_steps: 1024
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+# Tuned
+PerturbPendulum-v1:
+  n_envs: 4
+  n_timesteps: !!float 1e5
+  policy: 'MlpPolicy'
+  n_steps: 1024
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+# Tuned
+MountainCarContinuous-v0:
+  normalize: true
+  n_envs: 1
+  n_timesteps: !!float 20000
+  policy: 'MlpPolicy'
+  batch_size: 256
+  n_steps: 8
+  gamma: 0.9999
+  learning_rate: !!float 7.77e-05
+  ent_coef: 0.00429
+  clip_range: 0.1
+  n_epochs: 10
+  gae_lambda: 0.9
+  max_grad_norm: 5
+  vf_coef: 0.19
+  use_sde: True
+  policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
+
+# Tuned
+PerturbMountainCarContinuous-v0:
+  normalize: true
+  n_envs: 1
+  n_timesteps: !!float 20000
+  policy: 'MlpPolicy'
+  batch_size: 256
+  n_steps: 8
+  gamma: 0.9999
+  learning_rate: !!float 7.77e-05
+  ent_coef: 0.00429
+  clip_range: 0.1
+  n_epochs: 10
+  gae_lambda: 0.9
+  max_grad_norm: 5
+  vf_coef: 0.19
+  use_sde: True
+  policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
+
+
+
+# Tuned
+CartPole-v1:
+  n_envs: 8
+  n_timesteps: !!float 1e5
+  policy: 'MlpPolicy'
+  n_steps: 32
+  batch_size: 256
+  gae_lambda: 0.8
+  gamma: 0.98
+  n_epochs: 20
+  ent_coef: 0.0
+  learning_rate: lin_0.001
+  clip_range: lin_0.2
+
+# Tuned
+PerturbCartPole-v1:
+  n_envs: 8
+  n_timesteps: !!float 1e5
+  policy: 'MlpPolicy'
+  n_steps: 32
+  batch_size: 256
+  gae_lambda: 0.8
+  gamma: 0.98
+  n_epochs: 20
+  ent_coef: 0.0
+  learning_rate: lin_0.001
+  clip_range: lin_0.2
+
+Acrobot-v1:
+  normalize: true
+  n_envs: 16
+  n_timesteps: !!float 1e6
+  policy: 'MlpPolicy'
+  n_steps: 256
+  gae_lambda: 0.94
+  gamma: 0.99
+  n_epochs: 4
+  ent_coef: 0.0
+
+PerturbAcrobot-v1:
+  normalize: true
+  n_envs: 16
+  n_timesteps: !!float 1e6
+  policy: 'MlpPolicy'
+  n_steps: 256
+  gae_lambda: 0.94
+  gamma: 0.99
+  n_epochs: 4
+  ent_coef: 0.0

@@ -23,10 +23,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv,
 
 import rl_zoo3.register
 
-from rl_zoo3.federate.buff.buff.td3_avg import TD3Avg
-from rl_zoo3.federate.ppo_avg.ppo_avg import PPOAvg
-
-from rl_zoo3.federate.fedsp_pg.fedsp_pg_ppo import FedSPPGPPO
+from rl_zoo3.algorithms.federate import FEDERATE_ALGOS
+from rl_zoo3.algorithms.protester import PROTESTER_ALGOS
 
 # For custom activation fn
 from torch import nn as nn
@@ -46,10 +44,8 @@ ALGOS: dict[str, type[BaseAlgorithm]] = {
     "trpo": TRPO,
     "ppo_lstm": RecurrentPPO,
 
-    "td3_avg": TD3Avg,
-    "ppo_avg": PPOAvg,
-
-    "fedsp_pg_ppo": FedSPPGPPO,
+    **FEDERATE_ALGOS,
+    **PROTESTER_ALGOS,
 }
 
 

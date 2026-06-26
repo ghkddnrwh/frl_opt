@@ -1,0 +1,84 @@
+# Hyperparameters for FedSVRPG-M
+#
+# Paper-inspired mapping:
+# - `local_steps` = round당 client interaction budget
+#   내부적으로는 ceil(local_steps / local_iteration_horizon) 만큼의
+#   논문식 local trajectory iteration K 로 변환된다.
+# - `local_lr` = local step-size eta in Algorithm 5
+# - `server_update_weight` = global step-size lambda in Algorithm 5
+# - `momentum_beta` = beta in Eq. (5.4)
+# - `init_grad_episodes` controls the bootstrap estimate u0
+#
+# Implementation note:
+# This implementation uses SB3 PPO rollouts/critic updates and a practical
+# policy-gradient actor-delta estimator inside the FedSVRPG-M recursion.
+# Therefore `local_lr` scales an actor update delta, not a raw gradient.
+
+PerturbPendulum-v1:
+  n_timesteps: !!float 1e5
+
+  # Federated parameters
+  num_clients: 5
+  local_steps: 256
+  local_iteration_horizon: 200
+  local_lr: !!float 1.0
+  server_update_weight: !!float 1.0
+  momentum_beta: !!float 0.9
+  init_grad_episodes: 1
+  max_grad_norm: !!float 5.0
+  max_update_norm: !!float 0.05
+
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 256
+  batch_size: 16
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+  # Evaluation
+  eval_local_episodes: 10
+  eval_nominal_episodes: 10
+  eval_round_freq: 10
+  eval_deterministic: True
+
+PerturbMountainCarContinuous-v0:
+  n_timesteps: !!float 2e4
+
+  # Federated parameters
+  num_clients: 5
+  local_steps: 64
+  local_iteration_horizon: 999
+  local_lr: !!float 1.0
+  server_update_weight: !!float 1.0
+  momentum_beta: !!float 0.9
+  init_grad_episodes: 1
+  max_grad_norm: !!float 5.0
+  max_update_norm: !!float 0.05
+
+  normalize: true
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 8
+  batch_size: 8
+  gamma: 0.9999
+  learning_rate: !!float 7.77e-05
+  ent_coef: 0.00429
+  clip_range: 0.1
+  n_epochs: 10
+  gae_lambda: 0.9
+  max_grad_norm: 5
+  vf_coef: 0.19
+  use_sde: True
+  policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
+
+  # Evaluation
+  eval_local_episodes: 10
+  eval_nominal_episodes: 10
+  eval_round_freq: 10
+  eval_deterministic: True

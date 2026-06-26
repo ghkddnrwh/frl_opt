@@ -1,0 +1,24 @@
+(frl_opt) ukjo@ukjoui-MacBookPro frl_opt % ps -ef | grep python | grep train.py
+  
+  
+  
+  
+  501  5592  5590   0  3:08PM ttys072    8:38.69 python rl_zoo3/train.py --algo ar_td3_avg --env PerturbWalker2d-v4 --log-folder logs/federate_logs/tuning/ar_td3_avg/gravity/0.05/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.05 eval_round_freq:200 --seed 1 --frl --log-wandb True --device cpu
+  
+  
+  501 65806 25932   0  9:10AM ttys114  377:24.81 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbWalker2d-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+  501 65739 25999   0  9:09AM ttys117  379:05.82 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbHopper-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+  501 66195 26025   0  9:22AM ttys120  363:25.93 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbAnt-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+
+
+  (frl_opt) ukjo@ukjoui-MacBookPro frl_opt % ps -ef | grep python | grep train.py
+  
+  
+  
+  
+  
+  
+  501 65806 25932   0  9:10AM ttys114  377:44.23 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbWalker2d-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+  501 65739 25999   0  9:09AM ttys117  379:25.20 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbHopper-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+  501 66195 26025   0  9:22AM ttys120  363:45.33 python rl_zoo3/train.py --algo ar_sac_avg --env PerturbAnt-v4 --log-folder logs/federate_logs/tuning/ar_sac_avg/gravity/0.15/100 --hyperparams perturb_noise_type:"gravity" perturb_noise_range:0.5 n_timesteps:3e6 local_steps:100 cautious_weight:0.15 eval_round_freq:200 --seed 2 --frl --log-wandb True --device cpu
+(frl_opt) ukjo@ukjoui-MacBookPro frl_opt % 

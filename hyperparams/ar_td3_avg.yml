@@ -1,0 +1,71 @@
+PerturbPendulum-v1:
+  # global / federated
+  n_timesteps: 40000
+  num_clients: 5
+  local_steps: 1000
+  server_update_weight: 1.0
+
+  # local / per-client TD3
+  batch_size: 64
+  buffer_size: 20000
+  learning_starts: 1000
+  policy: "MlpPolicy"
+  gamma: 0.98
+  noise_type: "normal"
+  noise_std: 0.1
+  gradient_steps: 1
+  train_freq: 1
+  learning_rate: !!float 1e-3
+  policy_kwargs: "dict(net_arch=[400, 300], protester_net_arch=[400, 300], n_critics=1)"
+  eval_nominal_episodes: 10
+  eval_local_episodes: 10
+
+# LunarLanderContinuous-v3:
+#   n_timesteps: !!float 3e5
+#   num_clients: 5
+#   local_steps: 5000
+#   server_update_weight: 1.0
+
+#   batch_size: 256
+#   buffer_size: 200000
+#   learning_starts: 10000
+#   policy: "MlpPolicy"
+#   gamma: 0.98
+#   noise_type: "normal"
+#   noise_std: 0.1
+#   gradient_steps: 1
+#   train_freq: 1
+#   learning_rate: !!float 1e-3
+#   policy_kwargs: "dict(net_arch=[400, 300])"
+
+PerturbHalfCheetah-v4: &mujoco-defaults
+  n_timesteps: !!float 1e6
+  num_clients: 5
+  local_steps: 100
+  server_update_weight: 1.0
+  eval_round_freq: 50
+
+  batch_size: 64
+  buffer_size: 100_000
+  policy: "MlpPolicy"
+  learning_starts: 10000
+  noise_type: "normal"
+  noise_std: 0.1
+  train_freq: 1
+  gradient_steps: 1
+  learning_rate: !!float 1e-3
+  policy_kwargs: "dict(net_arch=[400, 300], protester_net_arch=[400, 300], n_critics=1)"
+
+PerturbAnt-v4:
+  <<: *mujoco-defaults
+
+PerturbHopper-v4:
+  <<: *mujoco-defaults
+
+PerturbWalker2d-v4:
+  <<: *mujoco-defaults
+
+PerturbHumanoid-v4:
+  <<: *mujoco-defaults
+  learning_rate: !!float 3e-4
+  n_timesteps: !!float 2e6

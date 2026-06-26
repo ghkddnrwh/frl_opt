@@ -217,7 +217,7 @@ class PerturbLunarLanderWindContinuous(gym.Env, EzPickle):
         render_mode: Optional[str] = None,
         continuous: bool = True,
         gravity: float = -6.0,
-        enable_wind: bool = True,
+        enable_wind: bool = False,
         wind_power: float = 10.0,
         turbulence_power: float = 1.0,
         noise_type=None,

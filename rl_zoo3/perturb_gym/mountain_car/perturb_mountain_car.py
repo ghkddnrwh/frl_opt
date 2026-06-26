@@ -124,6 +124,7 @@ class PerturbMountainCarEnv(gym.Env):
             "gravity": ["gravity"],
             "force": ["force"],
             "gravity_force": ["gravity", "force"],
+            "all": ["gravity", "force"],
         }
 
         if noise_type is not None:

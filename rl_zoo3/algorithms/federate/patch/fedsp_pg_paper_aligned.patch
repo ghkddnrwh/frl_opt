@@ -1,0 +1,646 @@
+diff --git a/hyperparams/fedsp_pg_ppo.yml b/hyperparams/fedsp_pg_ppo.yml
+index 81337d4..dc7780b 100644
+--- a/hyperparams/fedsp_pg_ppo.yml
++++ b/hyperparams/fedsp_pg_ppo.yml
+@@ -32,9 +32,13 @@ PerturbPendulum-v1:
+ 
+   # Federated parameters
+   num_clients: 5
+-  local_steps: 256
++  # PPO collects fixed-size rollouts. Keep this aligned with n_steps
++  # so one federated local update corresponds to one rollout batch.
++  local_steps: 1024
+   server_update_weight: 1.0
+-  dual_lr: 0.05
++  # FedSP-PG dual step size. Returns are discounted but still environment-scale dependent;
++  # use a conservative value to avoid immediate one-hot simplex projection.
++  dual_lr: 0.001
+ 
+   batch_size: 16
+   n_envs: 1
+diff --git a/rl_zoo3/federate/fedsp_pg/fedsp_pg_ppo.py b/rl_zoo3/federate/fedsp_pg/fedsp_pg_ppo.py
+index c3b57b4..7035100 100644
+--- a/rl_zoo3/federate/fedsp_pg/fedsp_pg_ppo.py
++++ b/rl_zoo3/federate/fedsp_pg/fedsp_pg_ppo.py
+@@ -2,19 +2,18 @@ from __future__ import annotations
+ 
+ from collections import OrderedDict
+ from collections.abc import Sequence
+-from copy import deepcopy
+ from typing import Any
+ 
+ import numpy as np
+ import torch as th
++import torch.nn.functional as F
++from gymnasium import spaces
+ from stable_baselines3.common.buffers import RolloutBuffer
+ from stable_baselines3.common.callbacks import CallbackList
+-from stable_baselines3.common.type_aliases import Schedule
+ from stable_baselines3.ppo import PPO
+ 
+-from rl_zoo3.federate.buff.buff.federated_algorithm import (
++from rl_zoo3.federate.common.federated_algorithm import (
+     FederatedAlgorithmMixin,
+-    FederatedModuleState,
+     FederatedModules,
+     FederatedPayload,
+ )
+@@ -44,24 +43,28 @@ def project_to_simplex(v: np.ndarray) -> np.ndarray:
+ 
+ 
+ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+-    """
+-    PPO-based FedSP-PG.
+-
+-    Local client:
+-      - collects rollout data on its own environment,
+-      - updates its local critic/value function,
+-      - computes a local actor gradient estimate,
+-      - estimates the environment return.
+-
+-    Server:
+-      - aggregates local actor gradients with dual weights lambda,
+-      - updates the shared actor,
+-      - updates lambda via projected gradient descent using local returns.
+-
+-    Notes:
+-      - actor is global/shared,
+-      - critic is local-only,
+-      - only actor parameters are synchronized.
++    """PPO backbone for Federated Saddle-Point Policy Gradient (FedSP-PG).
++
++    This implementation follows the paper-level algorithm more closely than a
++    FedAvg-style PPO implementation:
++
++    Client side:
++      1. receive only the global/shared actor parameters,
++      2. collect trajectories in the local environment,
++      3. update the local critic only,
++      4. compute a PPO actor-gradient estimate without taking a local actor step,
++      5. send the actor gradient and Monte-Carlo return estimate to the server.
++
++    Server side:
++      1. aggregate client actor gradients with the current dual weights lambda,
++      2. perform one global actor gradient-ascent step,
++      3. update lambda by projected gradient descent on the simplex.
++
++    Important design choice:
++      Stable-Baselines3 stores actor and critic inside one ActorCriticPolicy.
++      Therefore, all synchronization/update helpers below explicitly filter the
++      policy state_dict so that only actor parameters are synchronized globally.
++      Critic/value-network parameters remain client-local.
+     """
+ 
+     federated_manager_keys: tuple[str, ...] = (
+@@ -78,7 +81,7 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         "initial_lambda",
+     )
+ 
+-    federated_actor_modules: tuple[str, ...] = ("policy",)
++    federated_actor_module_name = "policy"
+ 
+     def __init__(self, *args, **kwargs):
+         self.dual_lr = float(kwargs.pop("dual_lr", 0.05))
+@@ -95,42 +98,113 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         self._fedsp_num_clients_hint: int | None = None
+ 
+     # ------------------------------------------------------------------
+-    # Utilities
++    # Actor/critic key filtering utilities
++    # ------------------------------------------------------------------
++    @staticmethod
++    def _is_critic_key(key: str) -> bool:
++        """Return True for SB3 value/critic parameters."""
++        return (
++            key.startswith("value_net.")
++            or key.startswith("mlp_extractor.value_net.")
++            or key.startswith("vf_features_extractor.")
++        )
++
++    @staticmethod
++    def _is_explicit_actor_key(key: str) -> bool:
++        """Return True for SB3 actor/policy parameters.
++
++        MlpPolicy commonly uses:
++          - mlp_extractor.policy_net.*
++          - action_net.*
++          - log_std for Gaussian policies
++
++        CNN/custom policies may also have feature-extractor parameters. When
++        those features feed the actor, they must be part of the shared actor.
++        """
++        return (
++            key == "log_std"
++            or key.startswith("action_net.")
++            or key.startswith("mlp_extractor.policy_net.")
++            or key.startswith("pi_features_extractor.")
++            or key.startswith("features_extractor.")
++        )
++
++    def _actor_state_keys(self) -> tuple[str, ...]:
++        state = self.policy.state_dict()
++        explicit_actor_keys = [key for key in state.keys() if self._is_explicit_actor_key(key)]
++        if explicit_actor_keys:
++            return tuple(explicit_actor_keys)
++
++        # Fallback for unusual/custom SB3 policies: keep all non-critic floating
++        # entries. This is safer than synchronizing the value branch by default.
++        return tuple(
++            key for key, value in state.items() if th.is_floating_point(value) and not self._is_critic_key(key)
++        )
++
++    def _actor_named_parameters(self) -> dict[str, th.nn.Parameter]:
++        actor_keys = set(self._actor_state_keys())
++        return {
++            name: parameter
++            for name, parameter in self.policy.named_parameters()
++            if name in actor_keys and parameter.requires_grad
++        }
++
++    def _critic_named_parameters(self) -> dict[str, th.nn.Parameter]:
++        return {
++            name: parameter
++            for name, parameter in self.policy.named_parameters()
++            if self._is_critic_key(name) and parameter.requires_grad
++        }
++
++    # ------------------------------------------------------------------
++    # Federated actor-state helpers
+     # ------------------------------------------------------------------
+     def _get_actor_state(self) -> FederatedModules:
+-        modules: FederatedModules = {}
+-        for module_name in self.federated_actor_modules:
+-            module = getattr(self, module_name)
+-            modules[module_name] = OrderedDict(
+-                (key, value.detach().cpu().clone()) for key, value in module.state_dict().items()
++        policy_state = self.policy.state_dict()
++        actor_keys = self._actor_state_keys()
++        return {
++            self.federated_actor_module_name: OrderedDict(
++                (key, policy_state[key].detach().cpu().clone()) for key in actor_keys
+             )
+-        return modules
++        }
+ 
+     def _set_actor_state(self, modules: FederatedModules) -> None:
+-        device = self.device
+-        for module_name in self.federated_actor_modules:
+-            module = getattr(self, module_name)
+-            state_dict = OrderedDict(
+-                (key, value.to(device)) for key, value in modules[module_name].items()
+-            )
+-            module.load_state_dict(state_dict)
++        module_name = self.federated_actor_module_name
++        if module_name not in modules:
++            raise KeyError(f"Missing '{module_name}' in federated actor payload.")
++
++        current_state = self.policy.state_dict()
++        incoming_state = modules[module_name]
++        expected_keys = set(self._actor_state_keys())
++        incoming_keys = set(incoming_state.keys())
++        missing = expected_keys - incoming_keys
++        if missing:
++            raise KeyError(f"Actor payload is missing keys: {sorted(missing)}")
++
++        for key in expected_keys:
++            current_state[key] = incoming_state[key].to(self.device)
++        self.policy.load_state_dict(current_state, strict=True)
+ 
+     def _zero_like_actor_state(self) -> FederatedModules:
+         current = self._get_actor_state()
+-        zeros: FederatedModules = {}
+-        for module_name, module_state in current.items():
+-            zeros[module_name] = OrderedDict(
++        return {
++            module_name: OrderedDict(
+                 (key, th.zeros_like(value, dtype=value.dtype)) for key, value in module_state.items()
+             )
+-        return zeros
++            for module_name, module_state in current.items()
++        }
+ 
+-    def _clone_modules(self, modules: FederatedModules) -> FederatedModules:
+-        cloned: FederatedModules = {}
+-        for module_name, module_state in modules.items():
+-            cloned[module_name] = OrderedDict(
++    @staticmethod
++    def _clone_static_modules(modules: FederatedModules) -> FederatedModules:
++        return {
++            module_name: OrderedDict(
+                 (key, value.detach().cpu().clone()) for key, value in module_state.items()
+             )
+-        return cloned
++            for module_name, module_state in modules.items()
++        }
++
++    def _clone_modules(self, modules: FederatedModules) -> FederatedModules:
++        return self._clone_static_modules(modules)
+ 
+     def _ensure_lambda(self, num_clients: int) -> None:
+         if self.lambda_weights is not None and len(self.lambda_weights) == num_clients:
+@@ -141,16 +215,14 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         else:
+             init = np.asarray(self.initial_lambda, dtype=np.float64)
+             if init.shape != (num_clients,):
+-                raise ValueError(
+-                    f"initial_lambda shape mismatch: expected {(num_clients,)}, got {init.shape}"
+-                )
++                raise ValueError(f"initial_lambda shape mismatch: expected {(num_clients,)}, got {init.shape}")
+             self.lambda_weights = project_to_simplex(init)
+ 
++    # ------------------------------------------------------------------
++    # SB3 rollout/training helpers
++    # ------------------------------------------------------------------
+     def _init_fedsp_training_state(self) -> None:
+-        """
+-        Initialize the internal SB3 on-policy training state before calling collect_rollouts().
+-        This is normally done inside learn(), but FedSP-PG uses a custom local loop.
+-        """
++        """Initialize SB3 on-policy state used by collect_rollouts()."""
+         if self.ep_info_buffer is None or self.ep_success_buffer is None:
+             self._setup_learn(
+                 total_timesteps=0,
+@@ -176,6 +248,44 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+                 n_envs=self.n_envs,
+             )
+ 
++    def _estimate_discounted_mc_return(self) -> float:
++        """Estimate J_k(pi) from the most recent rollout buffer.
++
++        The paper defines J_k as a discounted trajectory return. SB3's rollout
++        buffer may contain several episodes or truncated episode segments, so we
++        compute per-episode/segment discounted returns and average them.
++        """
++        rewards = np.asarray(self.rollout_buffer.rewards.copy(), dtype=np.float64)
++        episode_starts = np.asarray(self.rollout_buffer.episode_starts.copy(), dtype=bool)
++        if rewards.ndim == 1:
++            rewards = rewards[:, None]
++        if episode_starts.ndim == 1:
++            episode_starts = episode_starts[:, None]
++
++        returns: list[float] = []
++        n_steps, n_envs = rewards.shape
++        for env_idx in range(n_envs):
++            running_return = 0.0
++            discount = 1.0
++            has_steps = False
++            for step_idx in range(n_steps):
++                if bool(episode_starts[step_idx, env_idx]) and has_steps:
++                    returns.append(running_return)
++                    running_return = 0.0
++                    discount = 1.0
++                    has_steps = False
++
++                running_return += discount * float(rewards[step_idx, env_idx])
++                discount *= float(self.gamma)
++                has_steps = True
++
++            if has_steps:
++                returns.append(running_return)
++
++        if not returns:
++            return 0.0
++        return float(np.mean(returns))
++
+     def _collect_one_rollout(self) -> float:
+         self._init_fedsp_training_state()
+ 
+@@ -191,52 +301,145 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         if not success:
+             raise RuntimeError("collect_rollouts() returned False.")
+ 
+-        rewards = self.rollout_buffer.rewards.copy()
+-        episode_return_estimate = float(np.mean(np.sum(rewards, axis=0)))
+-        return episode_return_estimate
++        return self._estimate_discounted_mc_return()
+ 
+-    def _train_local_critic_and_compute_actor_gradient(self) -> FederatedModules:
+-        """
+-        Run one PPO train() pass and extract the actor parameter delta as a gradient proxy.
++    def _prepare_rollout_actions(self, actions: th.Tensor) -> th.Tensor:
++        if isinstance(self.action_space, spaces.Discrete):
++            return actions.long().flatten()
++        return actions
+ 
+-        We approximate the local actor gradient by:
+-            grad ~= (theta_after - theta_before) / learning_rate
+-        This keeps the implementation simple and compatible with SB3 PPO.
+-        """
+-        actor_before = self._get_actor_state()
++    def _current_clip_range(self) -> float:
++        return float(self.clip_range(self._current_progress_remaining))
+ 
+-        # Standard PPO update over the rollout buffer:
+-        self.train()
++    def _current_clip_range_vf(self) -> float | None:
++        if self.clip_range_vf is None:
++            return None
++        return float(self.clip_range_vf(self._current_progress_remaining))
+ 
+-        actor_after = self._get_actor_state()
+-        lr = self.lr_schedule(1.0) if callable(self.lr_schedule) else self.learning_rate
+-        lr = float(lr) if lr is not None else 1e-3
+-        lr = max(lr, 1e-12)
+-
+-        grad_modules: FederatedModules = {}
+-        for module_name in actor_before.keys():
+-            grad_modules[module_name] = OrderedDict()
+-            for key in actor_before[module_name].keys():
+-                before = actor_before[module_name][key]
+-                after = actor_after[module_name][key]
+-                if th.is_floating_point(after):
+-                    grad_modules[module_name][key] = (after - before) / lr
++    def _ppo_value_loss(self, values: th.Tensor, rollout_data: Any, clip_range_vf: float | None) -> th.Tensor:
++        values = values.flatten()
++        if clip_range_vf is None:
++            values_pred = values
++        else:
++            values_pred = rollout_data.old_values + th.clamp(
++                values - rollout_data.old_values,
++                -clip_range_vf,
++                clip_range_vf,
++            )
++        return F.mse_loss(rollout_data.returns, values_pred)
++
++    def _update_local_critic(self) -> None:
++        """Update only client-local critic/value parameters on the rollout buffer."""
++        critic_params = self._critic_named_parameters()
++        if not critic_params:
++            # Custom policies might not expose value_net-style names. In that
++            # case, skip critic-only training rather than accidentally updating
++            # the shared actor.
++            return
++
++        self.policy.set_training_mode(True)
++        self._update_learning_rate(self.policy.optimizer)
++        clip_range_vf = self._current_clip_range_vf()
++
++        for _ in range(self.n_epochs):
++            for rollout_data in self.rollout_buffer.get(self.batch_size):
++                actions = self._prepare_rollout_actions(rollout_data.actions)
++                values, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
++                value_loss = self._ppo_value_loss(values, rollout_data, clip_range_vf)
++                loss = self.vf_coef * value_loss
++
++                self.policy.optimizer.zero_grad(set_to_none=True)
++                loss.backward()
++
++                for name, parameter in self.policy.named_parameters():
++                    if name not in critic_params:
++                        parameter.grad = None
++
++                th.nn.utils.clip_grad_norm_(list(critic_params.values()), self.max_grad_norm)
++                self.policy.optimizer.step()
++
++        self.policy.optimizer.zero_grad(set_to_none=True)
++
++    def _compute_actor_gradient(self) -> FederatedModules:
++        """Compute the local PPO actor-gradient estimate g_k without stepping actor.
++
++        SB3 minimizes ``policy_loss + ent_coef * entropy_loss`` where
++        ``policy_loss = - L_PPO``. FedSP-PG performs gradient ascent on L_PPO,
++        so the gradient transmitted to the server is the negative of the
++        minimization gradient.
++        """
++        actor_params = self._actor_named_parameters()
++        if not actor_params:
++            raise RuntimeError("Could not identify actor parameters for FedSP-PG PPO.")
++
++        self.policy.set_training_mode(True)
++        clip_range = self._current_clip_range()
++        gradient_sum = self._zero_like_actor_state()
++        module_name = self.federated_actor_module_name
++        num_actor_batches = 0
++
++        for _ in range(self.n_epochs):
++            for rollout_data in self.rollout_buffer.get(self.batch_size):
++                actions = self._prepare_rollout_actions(rollout_data.actions)
++                if self.use_sde:
++                    self.policy.reset_noise(self.batch_size)
++
++                _, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
++                advantages = rollout_data.advantages
++                if self.normalize_advantage and len(advantages) > 1:
++                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
++
++                ratio = th.exp(log_prob - rollout_data.old_log_prob)
++                policy_loss_1 = advantages * ratio
++                policy_loss_2 = advantages * th.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
++                policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
++
++                if entropy is None:
++                    entropy_loss = -th.mean(-log_prob)
+                 else:
+-                    grad_modules[module_name][key] = th.zeros_like(after)
+-        return grad_modules
++                    entropy_loss = -th.mean(entropy)
++
++                # Minimized by SB3; negate its gradient to obtain ascent gradient.
++                actor_minimization_loss = policy_loss + self.ent_coef * entropy_loss
++
++                self.policy.optimizer.zero_grad(set_to_none=True)
++                actor_minimization_loss.backward()
++
++                for name, parameter in self.policy.named_parameters():
++                    if name not in actor_params:
++                        parameter.grad = None
++
++                th.nn.utils.clip_grad_norm_(list(actor_params.values()), self.max_grad_norm)
++
++                for name, parameter in actor_params.items():
++                    if parameter.grad is not None and name in gradient_sum[module_name]:
++                        gradient_sum[module_name][name] += (-parameter.grad.detach().cpu())
++
++                num_actor_batches += 1
++                self.policy.optimizer.zero_grad(set_to_none=True)
++
++        if num_actor_batches == 0:
++            raise RuntimeError("No PPO minibatches were available for actor-gradient computation.")
++
++        for key in gradient_sum[module_name].keys():
++            gradient_sum[module_name][key] /= float(num_actor_batches)
++        return gradient_sum
++
++    def _train_local_critic_and_compute_actor_gradient(self) -> FederatedModules:
++        self._update_local_critic()
++        return self._compute_actor_gradient()
+ 
+     # ------------------------------------------------------------------
+     # Federated interface
+     # ------------------------------------------------------------------
+     def federated_local_update(self, local_steps: int, **kwargs) -> None:
+-        """
+-        Perform enough PPO rollout/update cycles to cover local_steps.
++        """Collect local rollouts, update local critic, and estimate actor gradient.
+ 
+-        local_steps is treated as the target amount of environment interaction.
+-        Since PPO collects fixed-size rollouts, the actual number of local steps
+-        is quantized by n_steps * n_envs.
++        ``local_steps`` is interpreted as a target amount of environment
++        interaction. PPO collects fixed-size rollouts, so the actual number of
++        steps is quantized by ``n_steps * n_envs``.
+         """
+-        del kwargs  # unused here
++        del kwargs
+ 
+         target_steps = int(local_steps)
+         if target_steps <= 0:
+@@ -263,14 +466,15 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+             num_updates += 1
+ 
+         assert gradient_accumulator is not None
+-
+         for module_name in gradient_accumulator.keys():
+             for key in gradient_accumulator[module_name].keys():
+                 gradient_accumulator[module_name][key] /= float(num_updates)
+ 
+         self._fedsp_last_gradient = gradient_accumulator
+         self._fedsp_last_return = float(np.mean(returns))
+-        self.num_timesteps += collected_steps
++
++        # Do NOT manually increment self.num_timesteps here. SB3's
++        # collect_rollouts() already increments num_timesteps internally.
+ 
+     def get_upload_payload(self) -> FederatedPayload:
+         if self._fedsp_last_gradient is None:
+@@ -291,13 +495,7 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         uploads: Sequence[FederatedPayload],
+         weights: Sequence[float] | None = None,
+     ) -> FederatedPayload:
+-        """
+-        Server-side aggregation payload.
+-
+-        We do not use the generic weights here.
+-        FedSP-PG uses dual weights lambda stored on the server instead.
+-        This method simply packages client gradients and returns together.
+-        """
++        """Package client gradients/returns for the FedSP-PG server update."""
+         del weights
+ 
+         if len(uploads) == 0:
+@@ -314,29 +512,13 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+             "num_clients": len(uploads),
+         }
+ 
+-    @staticmethod
+-    def _clone_static_modules(modules: FederatedModules) -> FederatedModules:
+-        cloned: FederatedModules = {}
+-        for module_name, module_state in modules.items():
+-            cloned[module_name] = OrderedDict(
+-                (key, value.detach().cpu().clone()) for key, value in module_state.items()
+-            )
+-        return cloned
+-
+     def apply_global_payload(self, payload: FederatedPayload, mix_weight: float = 1.0) -> None:
+-        """
+-        On the server model:
+-          - aggregate client gradients with lambda,
+-          - update actor,
+-          - update lambda.
+-
+-        On the client model:
+-          - receive actor_state and load it.
+-        """
++        """Apply either a server broadcast payload or a server update payload."""
+         if not (0.0 < mix_weight <= 1.0):
+             raise ValueError("mix_weight must be in (0, 1].")
+ 
+-        # Broadcast path: payload already contains actor_state only
++        # Broadcast path: clients receive the updated global actor only. Their
++        # critic/value parameters are intentionally preserved as local state.
+         if "actor_state" in payload and "client_actor_gradients" not in payload:
+             incoming_actor = payload["actor_state"]
+             if mix_weight < 1.0:
+@@ -354,60 +536,49 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+             self._set_actor_state(incoming_actor)
+             return
+ 
+-        # Server update path
++        # Server update path.
+         client_actor_gradients: list[FederatedModules] = payload["client_actor_gradients"]
+         client_returns = np.asarray(payload["client_returns"], dtype=np.float64)
+         num_clients = int(payload["num_clients"])
+ 
+         self._ensure_lambda(num_clients)
+-
+         assert self.lambda_weights is not None
+ 
+         actor_state = self._get_actor_state()
+-        lr = self.lr_schedule(1.0) if callable(self.lr_schedule) else self.learning_rate
++        module_name = self.federated_actor_module_name
++        lr = self.lr_schedule(self._current_progress_remaining) if callable(self.lr_schedule) else self.learning_rate
+         lr = float(lr) if lr is not None else 1e-3
+ 
+-        aggregated_grad: FederatedModules = {}
+-        for module_name, module_state in actor_state.items():
+-            aggregated_grad[module_name] = OrderedDict()
+-            for key, value in module_state.items():
+-                if th.is_floating_point(value):
+-                    g = th.zeros_like(value, dtype=value.dtype)
+-                    for lam, client_grad in zip(self.lambda_weights, client_actor_gradients, strict=True):
+-                        g += client_grad[module_name][key].to(value.dtype) * float(lam)
+-                    aggregated_grad[module_name][key] = g
+-                else:
+-                    aggregated_grad[module_name][key] = th.zeros_like(value)
++        aggregated_grad: FederatedModules = {module_name: OrderedDict()}
++        for key, value in actor_state[module_name].items():
++            if th.is_floating_point(value):
++                g = th.zeros_like(value, dtype=value.dtype)
++                for lam, client_grad in zip(self.lambda_weights, client_actor_gradients, strict=True):
++                    g += client_grad[module_name][key].to(value.dtype) * float(lam)
++                aggregated_grad[module_name][key] = g
++            else:
++                aggregated_grad[module_name][key] = th.zeros_like(value)
+ 
+-        updated_actor: FederatedModules = {}
+-        for module_name, module_state in actor_state.items():
+-            updated_actor[module_name] = OrderedDict()
+-            for key, value in module_state.items():
+-                if th.is_floating_point(value):
+-                    updated_actor[module_name][key] = value + lr * aggregated_grad[module_name][key]
+-                else:
+-                    updated_actor[module_name][key] = value.clone()
++        updated_actor: FederatedModules = {module_name: OrderedDict()}
++        for key, value in actor_state[module_name].items():
++            if th.is_floating_point(value):
++                updated_actor[module_name][key] = value + lr * aggregated_grad[module_name][key]
++            else:
++                updated_actor[module_name][key] = value.clone()
+ 
+         if mix_weight < 1.0:
+-            mixed_actor: FederatedModules = {}
+-            for module_name, module_state in actor_state.items():
+-                mixed_actor[module_name] = OrderedDict()
+-                for key, value in module_state.items():
+-                    if th.is_floating_point(value):
+-                        mixed_actor[module_name][key] = (
+-                            mix_weight * updated_actor[module_name][key]
+-                            + (1.0 - mix_weight) * value
+-                        )
+-                    else:
+-                        mixed_actor[module_name][key] = value.clone()
++            mixed_actor: FederatedModules = {module_name: OrderedDict()}
++            for key, value in actor_state[module_name].items():
++                if th.is_floating_point(value):
++                    mixed_actor[module_name][key] = mix_weight * updated_actor[module_name][key] + (1.0 - mix_weight) * value
++                else:
++                    mixed_actor[module_name][key] = value.clone()
+             updated_actor = mixed_actor
+ 
+         self._set_actor_state(updated_actor)
+ 
+-        # Dual update: lambda <- Proj( lambda - dual_lr * J )
++        # Dual update: lambda <- Proj_Delta(lambda - eta_lambda * J).
+         self.lambda_weights = project_to_simplex(self.lambda_weights - self.dual_lr * client_returns)
+-
+-        # Save latest server-side values so broadcast uses updated actor/lambda
+         self._fedsp_num_clients_hint = num_clients
+ 
+     def get_client_weight(self) -> float:
+@@ -420,4 +591,4 @@ class FedSPPGPPO(FederatedAlgorithmMixin, PPO):
+         return {
+             "actor_state": self._get_actor_state(),
+             "lambda_weights": None if self.lambda_weights is None else self.lambda_weights.copy(),
+-        }
+\ No newline at end of file
++        }

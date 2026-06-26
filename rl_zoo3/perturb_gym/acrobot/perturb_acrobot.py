@@ -11,6 +11,7 @@ from gymnasium.envs.classic_control import utils
 from gymnasium.error import DependencyNotInstalled
 import random
 
+from rl_zoo3.perturb_gym.common.noise_map import noise_map
 
 __copyright__ = "Copyright 2013, RLPy http://acl.mit.edu/RLPy"
 __credits__ = [
@@ -181,20 +182,13 @@ class PerturbAcrobotEnv(Env):
         ##############################################################################################################
         assert -1 < noise < 1, "noise must be in the range (-1, 1)"
 
-        # noise_type이 적용될 변수 매핑
-        noise_map = {
-            "gravity": ["GRAVITY"],
-            "length": ["LINK_LENGTH_1", "LINK_LENGTH_2"],
-            "mass": ["LINK_MASS_1", "LINK_MASS_2"],
-            "pos": ["LINK_COM_POS_1", "LINK_COM_POS_2"],
-            "length_pos": ["LINK_LENGTH_1", "LINK_LENGTH_2", "LINK_COM_POS_1", "LINK_COM_POS_2"],
-            "length_mass": ["LINK_LENGTH_1", "LINK_LENGTH_2", "LINK_MASS_1", "LINK_MASS_2"],
-            "length_pos_mass": ["LINK_LENGTH_1", "LINK_LENGTH_2", "LINK_MASS_1", "LINK_MASS_2",  "LINK_COM_POS_1", "LINK_COM_POS_2"],
-        }
+        env_name = "PerturbAcrobot-v1"
 
         if noise_type is not None:
-            if noise_type in noise_map:
-                for attr in noise_map[noise_type]:
+            print(f"noise_type : {noise_type}")
+            print(f"noise_map : {noise_map}")
+            if noise_type in noise_map[env_name]:
+                for attr in noise_map[env_name][noise_type]:
                     setattr(self, attr, getattr(self, attr) * (1 + noise))
             else:
                 raise ValueError(f"Invalid noise_type: {noise_type}")

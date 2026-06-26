@@ -1,0 +1,162 @@
+PerturbPendulum-v1:
+  n_timesteps: !!float 5e4
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 128
+  batch_size: 32
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbMountainCarContinuous-v0:
+  n_timesteps: !!float 3e4
+  num_clients: 5
+  local_steps: 64
+  server_update_weight: 1.0
+
+  normalize: true
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 64
+  batch_size: 16
+  gamma: 0.999
+  gae_lambda: 0.95
+  n_epochs: 10
+  ent_coef: 0.00429
+  learning_rate: !!float 1e-4
+  clip_range: 0.1
+  max_grad_norm: 5
+  vf_coef: 0.19
+  use_sde: True
+  policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbCartPole-v1:
+  n_timesteps: !!float 5e4
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 128
+  batch_size: 64
+  gae_lambda: 0.9
+  gamma: 0.98
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbAcrobot-v1:
+  n_timesteps: !!float 1e5
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+
+  normalize: true
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 128
+  batch_size: 32
+  gae_lambda: 0.94
+  gamma: 0.99
+  n_epochs: 4
+  ent_coef: 0.0
+  learning_rate: !!float 3e-4
+  clip_range: 0.2
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbMountainCar-v0:
+  n_timesteps: !!float 1e5
+  num_clients: 5
+  local_steps: 64
+  server_update_weight: 1.0
+
+  normalize: true
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 64
+  batch_size: 32
+  gae_lambda: 0.98
+  gamma: 0.99
+  n_epochs: 4
+  ent_coef: 0.0
+  learning_rate: !!float 3e-4
+  clip_range: 0.2
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbLunarLanderWind-v3:
+  n_timesteps: !!float 1e5
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 128
+  batch_size: 64
+  gae_lambda: 0.98
+  gamma: 0.999
+  n_epochs: 4
+  ent_coef: 0.01
+  learning_rate: !!float 3e-4
+  clip_range: 0.2
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
+
+PerturbLunarLander-v3:
+  n_timesteps: !!float 1e5
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+
+  policy: "MlpPolicy"
+  n_envs: 1
+  n_steps: 128
+  batch_size: 64
+  gae_lambda: 0.98
+  gamma: 0.999
+  n_epochs: 4
+  ent_coef: 0.01
+  learning_rate: !!float 3e-4
+  clip_range: 0.2
+
+  eval_local_episodes: 5
+  eval_nominal_episodes: 5
+  eval_round_freq: 1
+  eval_deterministic: True
