@@ -963,14 +963,14 @@ def main():
             # 여러 알고리즘의 경로를 리스트로 정의
             # 이제 local_steps, num_clients는 각 seed directory 안의 npy/npz metadata에서 자동으로 읽는다.
             algo_config_list = [
-                # ("td3_avg", f"logs/federate_logs/tuning/td3_avg/{perturbation_type}/200"),
-                ("sac_avg", f"logs/federate_logs/tuning/sac_avg/{perturbation_type}/200"),
-                # ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/{perturbation_type}/0.05/200"),
-                # ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/{perturbation_type}/0.1/200"),
-                # ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/{perturbation_type}/0.15/200"),
-                ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/{perturbation_type}/0.05/200"),
-                ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/{perturbation_type}/0.1/200"),
-                ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/{perturbation_type}/0.15/200"),
+                ("td3_avg", f"logs/federate_logs/tuning/td3_avg/reset_optimizer/{perturbation_type}/100"),
+                # ("sac_avg", f"logs/federate_logs/tuning/sac_avg/reset_optimizer/{perturbation_type}/100"),
+                ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/reset_optimizer/{perturbation_type}/0.05/100"),
+                ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/reset_optimizer/{perturbation_type}/0.1/100"),
+                ("ar_td3_avg", f"logs/federate_logs/tuning/ar_td3_avg/reset_optimizer/{perturbation_type}/0.15/100"),
+                # ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/reset_optimizer/{perturbation_type}/0.05/100"),
+                # ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/reset_optimizer/{perturbation_type}/0.1/100"),
+                # ("ar_sac_avg", f"logs/federate_logs/tuning/ar_sac_avg/reset_optimizer/{perturbation_type}/0.15/100"),
             ]
 
             plot_root_path = f"plots/federate/avg/{env_id}/{perturbation_type}"
