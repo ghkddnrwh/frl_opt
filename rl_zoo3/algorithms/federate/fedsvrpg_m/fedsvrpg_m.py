@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -21,6 +21,9 @@ from rl_zoo3.algorithms.federate.common.federated_algorithm import (
     FederatedPayload,
 )
 
+VecNormalizeState = dict[str, Any]
+RunningMeanStdState = dict[str, Any]
+
 
 class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     """PPO-based practical FedSVRPG-M implemented directly on top of SB3 PPO.
@@ -29,36 +32,64 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     backbone and implements only the federated FedSVRPG-M-style communication
     logic locally in this file.
 
-    The paper's raw REINFORCE/GPOMDP estimator is approximated by an
-    actor-only score/advantage gradient direction computed from PPO rollouts,
-    not by a temporary PPO optimizer delta.  For each local rollout k on
-    client i, the implemented direction is
+    This version uses an actual local PPO update by default.  With
+    ``fedsvrpg_local_update_mode="ppo_update"`` and ``momentum_beta=1.0``, a
+    client performs the same local PPO optimizer update used by SB3 PPO and
+    uploads the resulting actor displacement.  The server still follows the
+    FedSVRPG-M paper-style update: it reconstructs ``u_{r+1}`` by dividing the
+    averaged displacement by ``local_lr * num_local_updates`` and then applies
+    ``server_update_weight`` as lambda.  Therefore
+    ``server_update_weight = local_lr * K`` recovers actor-only PPOAvg-style
+    parameter averaging for beta=1.
 
-        u_{r,k} = beta * g_score(theta_{r,k}; B_{r,k})
-                  + (1 - beta) * [u_r
-                                   + g_score(theta_{r,k}; B_{r,k})
-                                   - w(B_{r,k}) g_score(theta_{r-1}; B_{r,k})],
+    For ``momentum_beta < 1.0``, the local PPO actor displacement is blended
+    with a FedSVRPG-M-style correction displacement.  The correction uses the
+    selected gradient estimator family
+    ``fedsvrpg_gradient_type in {"ppo_clip", "score"}``:
 
-    where w(B_{r,k}) is a trajectory-level importance-sampling weight computed
+        delta_local = beta * delta_ppo
+                      + (1 - beta) * local_lr * [u_r
+                          + g(theta_{r,k}; B_{r,k})
+                          - w(B_{r,k}) g(theta_{r-1}; B_{r,k})].
+
+    Here w(B_{r,k}) is a trajectory-level importance-sampling weight computed
     from log pi_{theta_{r-1}} - log pi_{theta_{r,k}} on the rollout.  Setting
     ``importance_ratio_clip=None`` leaves this IS weight unclipped; a positive
     value clips it to [1 / clip, clip], which is a practical biased variant.
 
-    The implementation uses the following scale convention.
-    ``_ppo_actor_gradient_delta_on_current_buffer`` returns an actor delta that
-    already includes SB3's PPO learning rate.  Therefore ``local_lr`` is the
-    paper's local step-size eta in the units of that PPO-gradient delta, while
-    the experiment manager's ``server_update_weight`` is the global step-size
-    lambda.  The server computes u_{r+1} by dividing averaged client actor
-    deltas by ``local_lr * num_local_updates``.
+    Set ``fedsvrpg_local_update_mode="gradient_update"`` to recover the older
+    gradient-level local update path that directly applies the FedSVRPG-M
+    direction instead of running a true PPO optimizer update.
+
+    ``actor_gradient_mode`` controls how the minibatch actor-gradient deltas
+    inside one rollout are aggregated.  ``mean`` averages over all
+    epoch/minibatch gradients and is the recommended, scale-stable default;
+    ``cumulative`` reproduces the previous behavior that sums every
+    epoch/minibatch delta.
+
+    The implementation uses the following scale convention.  The server always
+    computes ``u_{r+1}`` by dividing averaged client actor displacements by
+    ``local_lr * num_local_updates``.  In ``gradient_update`` mode this is the
+    paper's ``eta * K`` exactly.  In ``ppo_update`` mode the local displacement
+    is produced by SB3 PPO's optimizer, so ``local_lr`` is mainly the scale used
+    to interpret the displacement as a FedSVRPG-M direction and to choose the
+    matching lambda; setting ``server_update_weight = local_lr * K`` makes the
+    beta=1 server update equal to parameter averaging.
+
+    The auxiliary FedSVRPG-M correction still uses an actor-gradient estimator
+    selected by ``fedsvrpg_gradient_type``.  ``actor_n_epochs`` and
+    ``actor_batch_size`` control that correction-gradient estimator only; the
+    real local PPO update uses SB3's usual ``n_epochs`` and ``batch_size``.
 
     The initial server momentum/anchor u_0 is estimated once in
     ``prepare_federated_training`` by averaging ``init_grad_episodes`` initial
     rollout gradient directions from each client.  The actor parameters are not
     mutated while estimating the current and previous directions; the real
     local actor update is applied once through u_{r,k}.  The critic/value branch
-    remains client-local and is updated on the local rollout before estimating
-    the actor direction.
+    remains client-local.  During each local rollout update, the actor gradient
+    uses the rollout advantages computed at collection time, matching PPO's
+    fixed-advantage convention; the critic is updated afterward on the same
+    rollout buffer without refreshing actor advantages.
     """
 
     federated_actor_module_name = "policy"
@@ -80,16 +111,57 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         "init_grad_episodes",
         "max_update_norm",
         "importance_ratio_clip",
+        "actor_gradient_mode",
+        "actor_n_epochs",
+        "actor_batch_size",
+        "fedsvrpg_gradient_type",
+        "fedsvrpg_local_update_mode",
+        "vecnormalize_sync_mode",
         # Accepted for backward compatibility with older configs.  This PPO
         # version keeps the critic local, so these do not change synchronization.
         "critic_sync_mode",
     )
+    valid_vecnormalize_sync_modes: tuple[str, ...] = ("none", "obs", "reward", "obs_reward")
+    valid_actor_gradient_modes: tuple[str, ...] = ("mean", "cumulative")
+    valid_fedsvrpg_gradient_types: tuple[str, ...] = ("ppo_clip", "score")
+    valid_fedsvrpg_local_update_modes: tuple[str, ...] = ("ppo_update", "gradient_update")
+
+    # Last global VecNormalize state produced by the server.  This mirrors
+    # PPOAvg and prevents double-counting shared RunningMeanStd history when
+    # aggregating client normalizer updates over multiple communication rounds.
+    _last_global_vecnormalize_state: VecNormalizeState | None = None
 
     def __init__(self, *args, **kwargs):
+        self.vecnormalize_sync_mode = self._normalize_vecnormalize_sync_mode(
+            kwargs.pop("vecnormalize_sync_mode", "obs_reward")
+        )
         self.local_lr = float(kwargs.pop("local_lr", 1.0))
         self.momentum_beta = float(kwargs.pop("momentum_beta", 0.9))
         self.init_grad_episodes = int(kwargs.pop("init_grad_episodes", 1))
         self.max_update_norm = kwargs.pop("max_update_norm", None)
+        self.actor_gradient_mode = self._normalize_actor_gradient_mode(
+            kwargs.pop("actor_gradient_mode", "cumulative")
+        )
+        self.actor_n_epochs = int(kwargs.pop("actor_n_epochs", 1))
+        actor_batch_size = kwargs.pop("actor_batch_size", None)
+        if actor_batch_size is None:
+            self.actor_batch_size = None
+        elif isinstance(actor_batch_size, str) and actor_batch_size.strip().lower() in {
+            "none",
+            "full",
+            "full_rollout",
+            "rollout",
+            "all",
+        }:
+            self.actor_batch_size = None
+        else:
+            self.actor_batch_size = int(actor_batch_size)
+        self.fedsvrpg_gradient_type = self._normalize_fedsvrpg_gradient_type(
+            kwargs.pop("fedsvrpg_gradient_type", "ppo_clip")
+        )
+        self.fedsvrpg_local_update_mode = self._normalize_fedsvrpg_local_update_mode(
+            kwargs.pop("fedsvrpg_local_update_mode", "ppo_update")
+        )
 
         # Kept for compatibility with previous config files.
         kwargs.pop("local_iteration_horizon", None)
@@ -108,6 +180,10 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             raise ValueError("momentum_beta must be in [0, 1]")
         if self.init_grad_episodes < 1:
             raise ValueError("init_grad_episodes must be >= 1")
+        if self.actor_n_epochs < 1:
+            raise ValueError("actor_n_epochs must be >= 1")
+        if self.actor_batch_size is not None and self.actor_batch_size < 1:
+            raise ValueError("actor_batch_size must be positive, None, or 'full_rollout'")
         if self.max_update_norm is not None and float(self.max_update_norm) <= 0.0:
             raise ValueError("max_update_norm must be positive when provided")
         if self.importance_ratio_clip is not None and float(self.importance_ratio_clip) < 1.0:
@@ -125,6 +201,411 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     @classmethod
     def uses_federated_client_n_envs(cls) -> bool:
         return True
+
+    @classmethod
+    def reset_federated_state(cls) -> None:
+        cls._last_global_vecnormalize_state = None
+
+    @classmethod
+    def _normalize_vecnormalize_sync_mode(cls, mode: str) -> str:
+        """Normalize VecNormalize synchronization mode aliases.
+
+        Modes:
+          - none: do not upload, aggregate, or apply VecNormalize statistics.
+          - obs: synchronize only observation RunningMeanStd statistics.
+          - reward: synchronize only reward/return RunningMeanStd statistics.
+          - obs_reward: synchronize both observation and reward statistics.
+        """
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "false": "none",
+            "off": "none",
+            "no": "none",
+            "0": "none",
+            "disable": "none",
+            "disabled": "none",
+            "true": "obs_reward",
+            "on": "obs_reward",
+            "yes": "obs_reward",
+            "1": "obs_reward",
+            "all": "obs_reward",
+            "full": "obs_reward",
+            "both": "obs_reward",
+            "obs_only": "obs",
+            "observation": "obs",
+            "observations": "obs",
+            "state": "obs",
+            "states": "obs",
+            "ret": "reward",
+            "return": "reward",
+            "returns": "reward",
+            "reward_only": "reward",
+            "rewards": "reward",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_vecnormalize_sync_modes:
+            raise ValueError(
+                f"Unsupported vecnormalize_sync_mode={mode!r}. "
+                f"Choose one of {cls.valid_vecnormalize_sync_modes}."
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_actor_gradient_mode(cls, mode: str) -> str:
+        """Normalize actor-gradient aggregation mode aliases.
+
+        Modes:
+          - mean: average over all epoch/minibatch actor-gradient deltas.
+          - cumulative: sum all epoch/minibatch actor-gradient deltas.
+        """
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "avg": "mean",
+            "average": "mean",
+            "averaged": "mean",
+            "normalized": "mean",
+            "scale_invariant": "mean",
+            "sum": "cumulative",
+            "summed": "cumulative",
+            "accumulate": "cumulative",
+            "accumulated": "cumulative",
+            "old": "cumulative",
+            "legacy": "cumulative",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_actor_gradient_modes:
+            raise ValueError(
+                f"Unsupported actor_gradient_mode={mode!r}. "
+                f"Choose one of {cls.valid_actor_gradient_modes}."
+            )
+        return normalized
+
+
+
+    @classmethod
+    def _normalize_fedsvrpg_gradient_type(cls, mode: str) -> str:
+        """Normalize FedSVRPG-M actor-gradient estimator type.
+
+        Modes:
+          - ppo_clip: use PPO's clipped actor surrogate gradient.
+          - score: use the raw score-function surrogate -A log pi.
+        """
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "ppo": "ppo_clip",
+            "clipped": "ppo_clip",
+            "clip": "ppo_clip",
+            "ppo_clipped": "ppo_clip",
+            "ppo_surrogate": "ppo_clip",
+            "score_function": "score",
+            "score_func": "score",
+            "reinforce": "score",
+            "gpomdp": "score",
+            "raw": "score",
+            "vanilla_pg": "score",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_fedsvrpg_gradient_types:
+            raise ValueError(
+                f"Unsupported fedsvrpg_gradient_type={mode!r}. "
+                f"Choose one of {cls.valid_fedsvrpg_gradient_types}."
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_fedsvrpg_local_update_mode(cls, mode: str) -> str:
+        """Normalize the practical local-update backend.
+
+        Modes:
+          - ppo_update: run a real SB3 PPO local optimizer update first.
+          - gradient_update: apply the FedSVRPG-M gradient direction directly.
+        """
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "ppo": "ppo_update",
+            "ppoavg": "ppo_update",
+            "ppo_avg": "ppo_update",
+            "local_ppo": "ppo_update",
+            "local_ppo_update": "ppo_update",
+            "true_ppo": "ppo_update",
+            "gradient": "gradient_update",
+            "grad": "gradient_update",
+            "manual": "gradient_update",
+            "manual_gradient": "gradient_update",
+            "direction": "gradient_update",
+            "old": "gradient_update",
+            "legacy": "gradient_update",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_fedsvrpg_local_update_modes:
+            raise ValueError(
+                f"Unsupported fedsvrpg_local_update_mode={mode!r}. "
+                f"Choose one of {cls.valid_fedsvrpg_local_update_modes}."
+            )
+        return normalized
+
+    def _use_ppo_clip_gradient(self) -> bool:
+        return self.fedsvrpg_gradient_type == "ppo_clip"
+
+    @staticmethod
+    def _get_rms_state(rms: Any) -> RunningMeanStdState | dict[str, RunningMeanStdState]:
+        """Serialize SB3 RunningMeanStd, including dict-observation variants."""
+        if isinstance(rms, Mapping):
+            return {key: FedSVRPGM._get_rms_state(value) for key, value in rms.items()}
+
+        return {
+            "mean": np.asarray(rms.mean, dtype=np.float64).copy(),
+            "var": np.asarray(rms.var, dtype=np.float64).copy(),
+            "count": float(rms.count),
+        }
+
+    @staticmethod
+    def _set_rms_state(rms: Any, state: RunningMeanStdState | dict[str, RunningMeanStdState]) -> None:
+        """Restore SB3 RunningMeanStd, including dict-observation variants."""
+        if isinstance(rms, Mapping):
+            for key, value in state.items():
+                if key in rms:
+                    FedSVRPGM._set_rms_state(rms[key], value)
+            return
+
+        mean = np.asarray(state["mean"], dtype=np.float64)
+        var = np.asarray(state["var"], dtype=np.float64)
+        count = float(state["count"])
+
+        if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(var)) or not np.isfinite(count):
+            raise ValueError(f"Invalid VecNormalize RMS state: count={count}, mean={mean}, var={var}")
+
+        rms.mean = mean.copy()
+        rms.var = np.maximum(var, 1e-12).copy()
+        rms.count = max(count, 1e-4)
+
+    def _get_vecnormalize_state(self) -> VecNormalizeState | None:
+        """Serialize VecNormalize statistics from this model's env, if present."""
+        vecnormalize = self.get_vec_normalize_env()
+        if vecnormalize is None:
+            return None
+
+        state: VecNormalizeState = {
+            "norm_obs": bool(vecnormalize.norm_obs),
+            "norm_reward": bool(vecnormalize.norm_reward),
+            "clip_obs": float(vecnormalize.clip_obs),
+            "clip_reward": float(vecnormalize.clip_reward),
+            "gamma": float(vecnormalize.gamma),
+            "epsilon": float(vecnormalize.epsilon),
+            "training": bool(vecnormalize.training),
+            "obs_rms": None,
+            "ret_rms": None,
+        }
+
+        if getattr(vecnormalize, "obs_rms", None) is not None:
+            state["obs_rms"] = self._get_rms_state(vecnormalize.obs_rms)
+        if getattr(vecnormalize, "ret_rms", None) is not None:
+            state["ret_rms"] = self._get_rms_state(vecnormalize.ret_rms)
+
+        return state
+
+    def _get_filtered_vecnormalize_state(self) -> VecNormalizeState | None:
+        """Serialize only the VecNormalize statistics selected by sync mode."""
+        if self.vecnormalize_sync_mode == "none":
+            return None
+
+        state = self._get_vecnormalize_state()
+        if state is None:
+            return None
+
+        if self.vecnormalize_sync_mode == "obs":
+            state["ret_rms"] = None
+        elif self.vecnormalize_sync_mode == "reward":
+            state["obs_rms"] = None
+
+        return state
+
+    def _set_vecnormalize_state(self, state: VecNormalizeState | None) -> None:
+        """Apply VecNormalize statistics to this model's env, if present."""
+        if state is None:
+            return
+
+        vecnormalize = self.get_vec_normalize_env()
+        if vecnormalize is None:
+            return
+
+        for attr in ("norm_obs", "norm_reward", "clip_obs", "clip_reward", "gamma", "epsilon", "training"):
+            if attr in state:
+                setattr(vecnormalize, attr, state[attr])
+
+        if state.get("obs_rms") is not None and getattr(vecnormalize, "obs_rms", None) is not None:
+            self._set_rms_state(vecnormalize.obs_rms, state["obs_rms"])
+        if state.get("ret_rms") is not None and getattr(vecnormalize, "ret_rms", None) is not None:
+            self._set_rms_state(vecnormalize.ret_rms, state["ret_rms"])
+
+        if getattr(vecnormalize, "returns", None) is not None:
+            vecnormalize.returns = np.zeros_like(vecnormalize.returns)
+
+    def _reset_after_vecnormalize_sync(self) -> None:
+        """Drop rollout observations that were normalized with stale statistics."""
+        self._last_obs = None
+        self._last_original_obs = None
+        self._last_episode_starts = None
+
+    @staticmethod
+    def _clone_state(state: Any) -> Any:
+        if state is None:
+            return None
+        if isinstance(state, np.ndarray):
+            return state.copy()
+        if isinstance(state, Mapping):
+            return {key: FedSVRPGM._clone_state(value) for key, value in state.items()}
+        return state
+
+    @staticmethod
+    def _is_single_rms_state(state: Any) -> bool:
+        return isinstance(state, Mapping) and {"mean", "var", "count"}.issubset(state.keys())
+
+    @staticmethod
+    def _rms_is_finite(state: RunningMeanStdState) -> bool:
+        return (
+            np.isfinite(float(state["count"]))
+            and np.all(np.isfinite(np.asarray(state["mean"], dtype=np.float64)))
+            and np.all(np.isfinite(np.asarray(state["var"], dtype=np.float64)))
+        )
+
+    @classmethod
+    def _merge_single_rms_states(cls, states: Sequence[RunningMeanStdState]) -> RunningMeanStdState:
+        """Merge independent RunningMeanStd states exactly via M2 statistics."""
+        valid_states = [state for state in states if cls._rms_is_finite(state) and float(state["count"]) > 0.0]
+        if len(valid_states) == 0:
+            reference = states[0]
+            return {
+                "mean": np.asarray(reference["mean"], dtype=np.float64).copy(),
+                "var": np.maximum(np.asarray(reference["var"], dtype=np.float64), 1e-12).copy(),
+                "count": max(float(reference["count"]), 1e-4),
+            }
+
+        mean = np.asarray(valid_states[0]["mean"], dtype=np.float64).copy()
+        var = np.maximum(np.asarray(valid_states[0]["var"], dtype=np.float64), 0.0).copy()
+        count = float(valid_states[0]["count"])
+        m2 = var * count
+
+        for state in valid_states[1:]:
+            other_count = float(state["count"])
+            other_mean = np.asarray(state["mean"], dtype=np.float64)
+            other_var = np.maximum(np.asarray(state["var"], dtype=np.float64), 0.0)
+            other_m2 = other_var * other_count
+
+            total = count + other_count
+            if total <= 0.0:
+                continue
+            delta = other_mean - mean
+            mean = mean + delta * other_count / total
+            m2 = m2 + other_m2 + np.square(delta) * count * other_count / total
+            count = total
+
+        var = np.maximum(m2 / max(count, 1e-12), 1e-12)
+        return {"mean": mean, "var": var, "count": max(count, 1e-4)}
+
+    @classmethod
+    def _subtract_single_rms_state(
+        cls,
+        final_state: RunningMeanStdState,
+        base_state: RunningMeanStdState,
+    ) -> RunningMeanStdState | None:
+        """Recover the incremental samples D from final_state = merge(base_state, D)."""
+        if not cls._rms_is_finite(final_state) or not cls._rms_is_finite(base_state):
+            return None
+
+        final_count = float(final_state["count"])
+        base_count = float(base_state["count"])
+        inc_count = final_count - base_count
+        if inc_count <= 1e-8:
+            return None
+
+        final_mean = np.asarray(final_state["mean"], dtype=np.float64)
+        base_mean = np.asarray(base_state["mean"], dtype=np.float64)
+        final_var = np.maximum(np.asarray(final_state["var"], dtype=np.float64), 0.0)
+        base_var = np.maximum(np.asarray(base_state["var"], dtype=np.float64), 0.0)
+
+        if final_mean.shape != base_mean.shape or final_var.shape != base_var.shape:
+            return None
+
+        inc_mean = (final_count * final_mean - base_count * base_mean) / inc_count
+
+        m2_final = final_var * final_count
+        m2_base = base_var * base_count
+        correction = np.square(inc_mean - base_mean) * base_count * inc_count / final_count
+        m2_inc = m2_final - m2_base - correction
+        m2_inc = np.maximum(m2_inc, 0.0)
+        inc_var = np.maximum(m2_inc / inc_count, 1e-12)
+
+        if not np.all(np.isfinite(inc_mean)) or not np.all(np.isfinite(inc_var)):
+            return None
+
+        return {"mean": inc_mean, "var": inc_var, "count": inc_count}
+
+    @classmethod
+    def _aggregate_rms_states(
+        cls,
+        states: Sequence[RunningMeanStdState | dict[str, RunningMeanStdState]],
+        base_state: RunningMeanStdState | dict[str, RunningMeanStdState] | None = None,
+    ) -> RunningMeanStdState | dict[str, RunningMeanStdState]:
+        """Aggregate RunningMeanStd states without double-counting shared history."""
+        if len(states) == 0:
+            raise ValueError("At least one RunningMeanStd state is required.")
+
+        reference = states[0]
+        if not cls._is_single_rms_state(reference):
+            base_mapping = base_state if isinstance(base_state, Mapping) else None
+            return {
+                key: cls._aggregate_rms_states(
+                    [state[key] for state in states],
+                    base_mapping.get(key) if base_mapping is not None and key in base_mapping else None,
+                )
+                for key in reference.keys()
+            }
+
+        if base_state is not None and cls._is_single_rms_state(base_state):
+            increments = [cls._subtract_single_rms_state(state, base_state) for state in states]
+            if all(increment is not None for increment in increments):
+                merged_increments = cls._merge_single_rms_states(increments)  # type: ignore[arg-type]
+                return cls._merge_single_rms_states([base_state, merged_increments])  # type: ignore[list-item]
+
+        return cls._merge_single_rms_states(states)  # type: ignore[arg-type]
+
+    @classmethod
+    def average_vecnormalize_states(cls, states: Sequence[VecNormalizeState | None]) -> VecNormalizeState | None:
+        """Aggregate VecNormalize obs_rms/ret_rms states from clients."""
+        valid_states = [state for state in states if state is not None]
+        if len(valid_states) == 0:
+            cls._last_global_vecnormalize_state = None
+            return None
+
+        reference = valid_states[0]
+        previous_global = cls._last_global_vecnormalize_state
+
+        averaged: VecNormalizeState = {
+            "norm_obs": bool(reference["norm_obs"]),
+            "norm_reward": bool(reference["norm_reward"]),
+            "clip_obs": float(reference["clip_obs"]),
+            "clip_reward": float(reference["clip_reward"]),
+            "gamma": float(reference["gamma"]),
+            "epsilon": float(reference["epsilon"]),
+            "training": bool(reference["training"]),
+            "obs_rms": None,
+            "ret_rms": None,
+        }
+
+        if reference.get("obs_rms") is not None:
+            averaged["obs_rms"] = cls._aggregate_rms_states(
+                [state["obs_rms"] for state in valid_states if state.get("obs_rms") is not None],
+                previous_global.get("obs_rms") if previous_global is not None else None,
+            )
+        if reference.get("ret_rms") is not None:
+            averaged["ret_rms"] = cls._aggregate_rms_states(
+                [state["ret_rms"] for state in valid_states if state.get("ret_rms") is not None],
+                previous_global.get("ret_rms") if previous_global is not None else None,
+            )
+
+        cls._last_global_vecnormalize_state = cls._clone_state(averaged)
+        return averaged
 
     def resolve_federated_local_steps(
         self,
@@ -565,13 +1046,13 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     ) -> th.Tensor:
         """Return an actor-only PPO/score-function loss for one minibatch.
 
-        FedSVRPG-M's variance-reduction correction must subtract two
-        estimators of the same form.  The FedSVRPG-M path therefore calls this
-        function with ``use_ppo_clip=False`` for both the current local actor
-        and the previous global actor.  In that mode the loss is the
-        score/advantage surrogate ``-A log pi_theta(a|s)``; for the previous
-        global actor it is additionally multiplied by trajectory-level IS
-        weights.
+        FedSVRPG-M's variance-reduction correction should subtract two
+        estimators of the same form.  Therefore the current local actor and the
+        previous global actor are evaluated with the same ``use_ppo_clip``
+        value.  With ``use_ppo_clip=True`` this is PPO's clipped actor
+        surrogate; with ``False`` this is the raw score/advantage surrogate
+        ``-A log pi_theta(a|s)``.  The previous-global term may additionally be
+        multiplied by trajectory-level IS weights.
         """
         actions = self._prepare_rollout_actions(rollout_data.actions)
         if self.use_sde:
@@ -616,7 +1097,11 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
                 f"sample_weights must contain {total_size} entries, got {int(sample_weights.shape[0])}."
             )
 
-        batch_size = self.batch_size or total_size
+        # Actor-gradient estimation is intentionally decoupled from the
+        # PPO critic's minibatch schedule.  By default, use one full-rollout
+        # batch so one rollout produces one stochastic policy-gradient
+        # estimate, as in the FedSVRPG-M paper.
+        batch_size = total_size if self.actor_batch_size is None else min(int(self.actor_batch_size), total_size)
         indices = np.random.permutation(total_size)
 
         observations = self.rollout_buffer.swap_and_flatten(self.rollout_buffer.observations)
@@ -722,11 +1207,16 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         sample_weights: np.ndarray | None = None,
         use_ppo_clip: bool = True,
     ) -> FederatedModules:
-        """Compute a PPO actor-gradient delta without mutating actor parameters.
+        """Compute a raw actor-gradient direction without mutating actor parameters.
 
-        This returns -lr * grad(actor_loss) accumulated over the same minibatch
-        schedule PPO would use.  Unlike the old temporary-update proxy, no Adam
-        state or repeated in-place actor update is mixed into the estimator.
+        This returns a sum/average of ``-grad(actor_loss)`` terms.  By default
+        actor_loss is PPO's clipped actor surrogate; use
+        ``fedsvrpg_gradient_type='score'`` to switch back to the raw
+        score-function surrogate.  This helper does not multiply SB3's PPO
+        learning rate and it does not run Adam.  ``local_lr`` is the only local
+        actor step-size eta applied to this direction.  ``actor_n_epochs`` and
+        ``actor_batch_size`` control the actor-gradient estimator schedule
+        independently from the critic's PPO ``n_epochs`` and ``batch_size``.
         """
         actor_params = self._actor_named_parameters()
         if not actor_params:
@@ -735,14 +1225,14 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         original_actor_state = self._get_actor_state()
         module_name = self.federated_actor_module_name
         accumulated_delta = self._zero_like_actor_state()
+        num_actor_minibatches = 0
 
         try:
             self._set_actor_state(actor_state)
             self.policy.set_training_mode(True)
-            learning_rate = self._current_learning_rate()
             clip_range = self._current_clip_range()
 
-            for _ in range(self.n_epochs):
+            for _ in range(self.actor_n_epochs):
                 for rollout_data, batch_weights in self._iter_rollout_minibatches_with_weights(sample_weights):
                     self.policy.optimizer.zero_grad(set_to_none=True)
                     loss = self._actor_surrogate_loss(
@@ -765,9 +1255,15 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
                         if name not in accumulated_delta[module_name]:
                             continue
                         accumulated_delta[module_name][name] += (
-                            -float(learning_rate) * parameter.grad.detach().cpu().to(accumulated_delta[module_name][name].dtype)
+                            -parameter.grad.detach().cpu().to(accumulated_delta[module_name][name].dtype)
                         )
                     self.policy.optimizer.zero_grad(set_to_none=True)
+                    num_actor_minibatches += 1
+
+            if self.actor_gradient_mode == "mean":
+                if num_actor_minibatches <= 0:
+                    raise RuntimeError("No actor minibatches were generated for FedSVRPG-M actor gradient.")
+                accumulated_delta = self._scale_actor_delta(accumulated_delta, 1.0 / float(num_actor_minibatches))
 
             return accumulated_delta
         finally:
@@ -780,13 +1276,15 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         previous_global_actor_state: FederatedModules,
     ) -> tuple[FederatedModules, FederatedModules, dict[str, float]]:
         rng_snapshot = self._snapshot_rng_state()
-        # Use the same score/advantage estimator for both terms in
-        # g(theta_{r,k}) - w g(theta_{r-1}).  PPO clipping is intentionally
-        # disabled inside the SVRPG correction to preserve this pairing.
+        # Use the same estimator family for both terms in
+        # g(theta_{r,k}) - w g(theta_{r-1}).  By default this is PPO's clipped
+        # actor surrogate gradient.  Setting fedsvrpg_gradient_type='score'
+        # recovers the previous raw score-function-gradient variant.
+        use_ppo_clip = self._use_ppo_clip_gradient()
         current_delta = self._ppo_actor_gradient_delta_on_current_buffer(
             current_actor_state,
             sample_weights=None,
-            use_ppo_clip=False,
+            use_ppo_clip=use_ppo_clip,
         )
         self._restore_rng_state(rng_snapshot)
 
@@ -794,7 +1292,7 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         previous_global_delta = self._ppo_actor_gradient_delta_on_current_buffer(
             previous_global_actor_state,
             sample_weights=trajectory_weights,
-            use_ppo_clip=False,
+            use_ppo_clip=use_ppo_clip,
         )
         weight_metrics = {
             "frl/fedsvrpg_is_weight_mean": float(np.mean(trajectory_weights)),
@@ -812,6 +1310,20 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         updated_actor = self._add_static_modules(current_actor, scaled_delta)
         self._set_actor_state(updated_actor)
         self._reset_actor_optimizer_state()
+
+    def _run_local_ppo_update(self) -> FederatedModules:
+        """Run the real SB3 PPO local update and return the actor displacement.
+
+        Unlike ``_ppo_actor_gradient_delta_on_current_buffer()``, this mutates
+        the policy with PPO's normal training operator: clipped actor loss,
+        value loss, entropy term, Adam optimizer, minibatch replay, and PPO's
+        configured ``n_epochs``/``batch_size`` schedule.  The returned object is
+        a parameter displacement ``actor_after - actor_before``.
+        """
+        actor_before = self._get_actor_state()
+        self.train()
+        actor_after = self._get_actor_state()
+        return self._subtract_static_modules(actor_after, actor_before)
 
 
     # ------------------------------------------------------------------
@@ -839,7 +1351,7 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             direction = self._ppo_actor_gradient_delta_on_current_buffer(
                 initial_actor,
                 sample_weights=None,
-                use_ppo_clip=False,
+                use_ppo_clip=self._use_ppo_clip_gradient(),
             )
             accumulated_direction = self._add_actor_deltas(accumulated_direction, direction)
             returns.append(float(rollout_return))
@@ -874,6 +1386,36 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         client_metrics: list[dict[str, float]] = []
         theta0_actor = self._get_actor_state()
 
+        # In the default practical PPO backend with beta=1, the SVRPG anchor is
+        # unused.  Skipping the extra u0 rollout makes the beta=1 path much
+        # closer to PPOAvg: no pre-training rollout is collected solely for
+        # momentum initialization.
+        if self.fedsvrpg_local_update_mode == "ppo_update" and self.momentum_beta >= 1.0:
+            zero_direction = self._zero_like_actor_state()
+            self._fedsvrpg_prev_global_actor_state = self._clone_modules(theta0_actor)
+            self._fedsvrpg_round_start_actor_state = self._clone_modules(theta0_actor)
+            self._fedsvrpg_server_direction = self._clone_modules(zero_direction)
+            self._fedsvrpg_last_actor_delta = self._zero_like_actor_state()
+            self._fedsvrpg_last_num_local_updates = 0
+            for client in clients:
+                if not isinstance(client, FedSVRPGM):
+                    raise TypeError("FedSVRPGM.prepare_federated_training expects FedSVRPGM clients.")
+                client._set_actor_state(theta0_actor)
+                client._fedsvrpg_prev_global_actor_state = client._clone_modules(theta0_actor)
+                client._fedsvrpg_round_start_actor_state = client._clone_modules(theta0_actor)
+                client._fedsvrpg_server_direction = client._clone_modules(zero_direction)
+                client._fedsvrpg_last_actor_delta = client._zero_like_actor_state()
+                client._fedsvrpg_last_num_local_updates = 0
+            self._last_federated_metrics = {
+                "frl/fedsvrpg_u0_initialized": 0.0,
+                "frl/fedsvrpg_u0_skipped_for_ppo_beta1": 1.0,
+                "frl/fedsvrpg_gradient_type_ppo_clip": float(self.fedsvrpg_gradient_type == "ppo_clip"),
+                "frl/fedsvrpg_gradient_type_score": float(self.fedsvrpg_gradient_type == "score"),
+                "frl/fedsvrpg_local_update_mode_ppo": 1.0,
+                "frl/fedsvrpg_local_update_mode_gradient": 0.0,
+            }
+            return
+
         for client in clients:
             if not isinstance(client, FedSVRPGM):
                 raise TypeError("FedSVRPGM.prepare_federated_training expects FedSVRPGM clients.")
@@ -900,6 +1442,25 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             client._fedsvrpg_last_actor_delta = client._zero_like_actor_state()
             client._fedsvrpg_last_num_local_updates = 0
 
+        # ``_estimate_initial_actor_direction()`` collects real rollouts, which
+        # updates VecNormalize statistics on each client before the first
+        # communication round.  PPOAvg does not have this extra pre-training
+        # rollout phase, so copying its round-end synchronization alone leaves
+        # FedSVRPG-M clients starting round 1 with different normalizers.  Bring
+        # all clients and the server back to a common VecNormalize state here,
+        # and store it as the global baseline used by the next aggregation to
+        # avoid double-counting shared RunningMeanStd history.
+        if self.vecnormalize_sync_mode != "none":
+            initial_vecnormalize = self.average_vecnormalize_states(
+                [client._get_filtered_vecnormalize_state() for client in clients if isinstance(client, FedSVRPGM)]
+            )
+            self._set_vecnormalize_state(initial_vecnormalize)
+            self._reset_after_vecnormalize_sync()
+            for client in clients:
+                assert isinstance(client, FedSVRPGM)
+                client._set_vecnormalize_state(initial_vecnormalize)
+                client._reset_after_vecnormalize_sync()
+
         u0_client_norms = [m["frl/fedsvrpg_u0_client_direction_norm"] for m in client_metrics]
         u0_client_returns = [m["frl/fedsvrpg_u0_client_return"] for m in client_metrics]
         self._last_federated_metrics = {
@@ -908,6 +1469,10 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             "frl/fedsvrpg_u0_direction_norm": self._actor_delta_norm(u0),
             "frl/fedsvrpg_u0_client_direction_norm_mean": float(np.mean(u0_client_norms)) if u0_client_norms else 0.0,
             "frl/fedsvrpg_u0_client_return_mean": float(np.mean(u0_client_returns)) if u0_client_returns else 0.0,
+            "frl/fedsvrpg_gradient_type_ppo_clip": float(self.fedsvrpg_gradient_type == "ppo_clip"),
+            "frl/fedsvrpg_gradient_type_score": float(self.fedsvrpg_gradient_type == "score"),
+            "frl/fedsvrpg_local_update_mode_ppo": float(self.fedsvrpg_local_update_mode == "ppo_update"),
+            "frl/fedsvrpg_local_update_mode_gradient": float(self.fedsvrpg_local_update_mode == "gradient_update"),
         }
 
     # ------------------------------------------------------------------
@@ -935,6 +1500,7 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         num_local_updates = 0
         local_returns: list[float] = []
         update_norms: list[float] = []
+        ppo_delta_norms: list[float] = []
         current_delta_norms: list[float] = []
         correction_norms: list[float] = []
         is_weight_means: list[float] = []
@@ -942,34 +1508,91 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
 
         while collected_steps < target_steps:
             rollout_return = self._collect_one_rollout()
-
-            # Keep the value function client-local.  Then recompute advantages
-            # so the actor proxy uses the updated local critic.
-            self._update_local_critic()
-            self._refresh_rollout_advantages()
-
             current_actor = self._get_actor_state()
-            current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
-                current_actor,
-                previous_global_actor,
-            )
 
-            correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
-            svrp_anchor = self._add_actor_deltas(server_direction, correction)
-            momentum_direction = self._add_actor_deltas(
-                self._scale_actor_delta(current_delta, self.momentum_beta),
-                self._scale_actor_delta(svrp_anchor, 1.0 - self.momentum_beta),
-            )
-            momentum_direction = self._clip_actor_delta(momentum_direction)
+            if self.fedsvrpg_local_update_mode == "ppo_update":
+                # Default practical PPO backend.
+                # First, optionally compute the FedSVRPG-M correction at the
+                # pre-PPO local actor.  For beta=1 this branch is skipped, so
+                # the client update is exactly the local SB3 PPO update.
+                if self.momentum_beta < 1.0:
+                    current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
+                        current_actor,
+                        previous_global_actor,
+                    )
+                    correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
+                    svrp_anchor = self._add_actor_deltas(server_direction, correction)
+                    svrp_delta = self._scale_actor_delta(svrp_anchor, self.local_lr)
+                    svrp_delta = self._clip_actor_delta(svrp_delta)
+                else:
+                    current_delta = self._zero_like_actor_state()
+                    correction = self._zero_like_actor_state()
+                    svrp_delta = self._zero_like_actor_state()
+                    is_metrics = {
+                        "frl/fedsvrpg_is_weight_mean": 1.0,
+                        "frl/fedsvrpg_is_weight_max": 1.0,
+                    }
 
-            self._apply_actor_delta(momentum_direction)
+                # Run the actual local PPO optimizer update.  This updates both
+                # actor and critic exactly as SB3 PPO would for this rollout.
+                ppo_delta = self._run_local_ppo_update()
+
+                if self.momentum_beta < 1.0:
+                    # Replace the PPO actor displacement by the beta-blended
+                    # practical FedSVRPG-M displacement.  The critic update made
+                    # by PPO is kept local.
+                    blended_delta = self._add_actor_deltas(
+                        self._scale_actor_delta(ppo_delta, self.momentum_beta),
+                        self._scale_actor_delta(svrp_delta, 1.0 - self.momentum_beta),
+                    )
+                    updated_actor = self._add_static_modules(current_actor, blended_delta)
+                    self._set_actor_state(updated_actor)
+                    self._reset_actor_optimizer_state()
+                    effective_delta = blended_delta
+                else:
+                    # beta=1: this is the local PPO update displacement.
+                    # The server will still divide the uploaded round delta by
+                    # local_lr * K and then multiply by lambda
+                    # (server_update_weight).  Setting lambda = local_lr * K
+                    # makes the shared actor update equal to actor-only PPOAvg
+                    # parameter averaging.
+                    effective_delta = ppo_delta
+
+                update_norms.append(self._actor_delta_norm(effective_delta))
+                ppo_delta_norms.append(self._actor_delta_norm(ppo_delta))
+                current_delta_norms.append(self._actor_delta_norm(current_delta))
+                correction_norms.append(self._actor_delta_norm(correction))
+                is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
+                is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
+
+            else:
+                # Legacy/theory-closer gradient-level backend.  This does not
+                # run PPO's optimizer for the actor; it applies the FedSVRPG-M
+                # direction manually and then fits the critic locally.
+                current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
+                    current_actor,
+                    previous_global_actor,
+                )
+
+                correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
+                svrp_anchor = self._add_actor_deltas(server_direction, correction)
+                momentum_direction = self._add_actor_deltas(
+                    self._scale_actor_delta(current_delta, self.momentum_beta),
+                    self._scale_actor_delta(svrp_anchor, 1.0 - self.momentum_beta),
+                )
+                momentum_direction = self._clip_actor_delta(momentum_direction)
+
+                self._apply_actor_delta(momentum_direction)
+                self._update_local_critic()
+
+                update_norms.append(self._actor_delta_norm(momentum_direction))
+                ppo_delta_norms.append(0.0)
+                current_delta_norms.append(self._actor_delta_norm(current_delta))
+                correction_norms.append(self._actor_delta_norm(correction))
+                is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
+                is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
 
             local_returns.append(float(rollout_return))
-            update_norms.append(self._actor_delta_norm(momentum_direction))
-            current_delta_norms.append(self._actor_delta_norm(current_delta))
-            correction_norms.append(self._actor_delta_norm(correction))
-            is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
-            is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
             collected_steps += self.n_steps * self.n_envs
             num_local_updates += 1
 
@@ -980,19 +1603,33 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         self._last_federated_metrics = {
             "frl/fedsvrpg_local_updates": float(num_local_updates),
             "frl/fedsvrpg_mean_update_norm": float(np.mean(update_norms)) if update_norms else 0.0,
+            "frl/fedsvrpg_mean_ppo_delta_norm": float(np.mean(ppo_delta_norms)) if ppo_delta_norms else 0.0,
             "frl/fedsvrpg_mean_current_delta_norm": float(np.mean(current_delta_norms)) if current_delta_norms else 0.0,
             "frl/fedsvrpg_mean_correction_norm": float(np.mean(correction_norms)) if correction_norms else 0.0,
             "frl/fedsvrpg_mean_is_weight": float(np.mean(is_weight_means)) if is_weight_means else 1.0,
             "frl/fedsvrpg_max_is_weight": float(np.max(is_weight_maxs)) if is_weight_maxs else 1.0,
+            "frl/fedsvrpg_gradient_type_ppo_clip": float(self.fedsvrpg_gradient_type == "ppo_clip"),
+            "frl/fedsvrpg_gradient_type_score": float(self.fedsvrpg_gradient_type == "score"),
+            "frl/fedsvrpg_local_update_mode_ppo": float(self.fedsvrpg_local_update_mode == "ppo_update"),
+            "frl/fedsvrpg_local_update_mode_gradient": float(self.fedsvrpg_local_update_mode == "gradient_update"),
+            "frl/fedsvrpg_actor_n_epochs": float(self.actor_n_epochs),
+            "frl/fedsvrpg_actor_batch_size": float(
+                self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
+                if self.actor_batch_size is None
+                else self.actor_batch_size
+            ),
         }
 
     def get_upload_payload(self) -> FederatedPayload:
         return {
             "round_start_actor_state": self._clone_modules(self._fedsvrpg_round_start_actor_state),
             "actor_delta": self._clone_modules(self._fedsvrpg_last_actor_delta),
+            "vecnormalize": self._get_filtered_vecnormalize_state(),
+            "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
             "return": float(self._fedsvrpg_last_return),
             "num_local_updates": int(self._fedsvrpg_last_num_local_updates),
             "local_lr": float(self.local_lr),
+            "fedsvrpg_local_update_mode": self.fedsvrpg_local_update_mode,
         }
 
     # ------------------------------------------------------------------
@@ -1007,9 +1644,35 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         if len(uploads) == 0:
             raise ValueError("At least one upload is required for federated aggregation.")
 
+        vecnormalize_modes = {
+            cls._normalize_vecnormalize_sync_mode(str(upload.get("vecnormalize_sync_mode", "obs_reward")))
+            for upload in uploads
+        }
+        if len(vecnormalize_modes) != 1:
+            raise ValueError(
+                f"Mixed vecnormalize_sync_mode values are not supported in one aggregation: {vecnormalize_modes}"
+            )
+        vecnormalize_sync_mode = next(iter(vecnormalize_modes))
+        local_update_modes = {
+            cls._normalize_fedsvrpg_local_update_mode(str(upload.get("fedsvrpg_local_update_mode", "gradient_update")))
+            for upload in uploads
+        }
+        if len(local_update_modes) != 1:
+            raise ValueError(
+                f"Mixed fedsvrpg_local_update_mode values are not supported in one aggregation: {local_update_modes}"
+            )
+        fedsvrpg_local_update_mode = next(iter(local_update_modes))
+
         actor_deltas = [upload["actor_delta"] for upload in uploads]
         aggregated_actor_delta = cls.average_module_states(actor_deltas, weights=weights)
         normalized_weights = cls.normalize_weights(len(uploads), weights)
+        if vecnormalize_sync_mode == "none":
+            aggregated_vecnormalize = None
+            cls._last_global_vecnormalize_state = None
+        else:
+            aggregated_vecnormalize = cls.average_vecnormalize_states(
+                [upload.get("vecnormalize") for upload in uploads]
+            )
 
         update_scales = []
         for upload in uploads:
@@ -1027,21 +1690,43 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             "reference_actor_state": reference_actor_state,
             "aggregated_actor_delta": aggregated_actor_delta,
             "server_direction": server_direction,
+            "fedsvrpg_local_update_mode": fedsvrpg_local_update_mode,
+            "vecnormalize": aggregated_vecnormalize,
+            "vecnormalize_sync_mode": vecnormalize_sync_mode,
             "return": mean_return,
             "num_clients": len(uploads),
             "mean_local_update_scale": denominator,
         }
 
     def apply_global_payload(self, payload: FederatedPayload, mix_weight: float = 1.0) -> None:
-        if not (0.0 < mix_weight <= 1.0):
-            raise ValueError("mix_weight must be in (0, 1].")
+        if not (float(mix_weight) > 0.0):
+            raise ValueError("mix_weight must be positive.")
 
-        # Server update path: reconstruct u_{r+1} from client deltas, then
-        # update theta_{r+1} = theta_r + lambda * u_{r+1}.  The federated
-        # manager passes lambda as server_update_weight via mix_weight.
+        payload_vecnormalize_mode = self._normalize_vecnormalize_sync_mode(
+            str(payload.get("vecnormalize_sync_mode", self.vecnormalize_sync_mode))
+        )
+        if payload_vecnormalize_mode != self.vecnormalize_sync_mode:
+            raise ValueError(
+                f"Client vecnormalize_sync_mode={self.vecnormalize_sync_mode!r} does not match "
+                f"payload vecnormalize_sync_mode={payload_vecnormalize_mode!r}."
+            )
+
+        # Server update path: keep the FedSVRPG-M paper-style server update
+        # for both local-update backends.  Clients upload actor displacements
+        # Delta_i.  The server reconstructs
+        #     u_{r+1} = average_i(Delta_i) / (eta * K)
+        # and then applies
+        #     theta_{r+1} = theta_r + lambda * u_{r+1}.
+        # The federated manager passes lambda as server_update_weight through
+        # mix_weight.  Therefore, in ppo_update mode with beta=1, choosing
+        # lambda = eta * K makes this equivalent to actor-only PPOAvg-style
+        # parameter averaging.
         if payload.get("aggregation_type") == "fedsvrpg_m_update":
             reference_actor = payload["reference_actor_state"]
             server_direction = payload["server_direction"]
+            payload_update_mode = self._normalize_fedsvrpg_local_update_mode(
+                str(payload.get("fedsvrpg_local_update_mode", "gradient_update"))
+            )
             server_step = self._scale_actor_delta(server_direction, mix_weight)
             updated_actor = self._add_static_modules(reference_actor, server_step)
 
@@ -1052,12 +1737,22 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             self._fedsvrpg_last_actor_delta = self._zero_like_actor_state()
             self._fedsvrpg_last_return = float(payload.get("return", 0.0))
             self._fedsvrpg_last_num_local_updates = 0
+            if self.vecnormalize_sync_mode != "none":
+                self._set_vecnormalize_state(payload.get("vecnormalize"))
+                self._reset_after_vecnormalize_sync()
             self._reset_actor_optimizer_state()
             self._last_federated_metrics = {
                 "frl/fedsvrpg_server_direction_norm": self._actor_delta_norm(server_direction),
                 "frl/fedsvrpg_server_step_norm": self._actor_delta_norm(server_step),
+                "frl/fedsvrpg_local_update_mode_ppo": float(payload_update_mode == "ppo_update"),
+                "frl/fedsvrpg_local_update_mode_gradient": float(payload_update_mode == "gradient_update"),
+                "frl/fedsvrpg_lambda_over_eta_k": float(mix_weight) / max(float(payload.get("mean_local_update_scale", 1.0)), 1e-12),
                 "frl/fedsvrpg_mean_return": float(payload.get("return", 0.0)),
                 "frl/fedsvrpg_mean_local_update_scale": float(payload.get("mean_local_update_scale", 1.0)),
+                "frl/fedsvrpg_vecnormalize_none": float(self.vecnormalize_sync_mode == "none"),
+                "frl/fedsvrpg_vecnormalize_obs": float(self.vecnormalize_sync_mode == "obs"),
+                "frl/fedsvrpg_vecnormalize_reward": float(self.vecnormalize_sync_mode == "reward"),
+                "frl/fedsvrpg_vecnormalize_obs_reward": float(self.vecnormalize_sync_mode == "obs_reward"),
             }
             return
 
@@ -1075,6 +1770,9 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         self._fedsvrpg_last_actor_delta = self._zero_like_actor_state()
         self._fedsvrpg_last_return = float(payload.get("return", 0.0))
         self._fedsvrpg_last_num_local_updates = 0
+        if self.vecnormalize_sync_mode != "none":
+            self._set_vecnormalize_state(payload.get("vecnormalize"))
+            self._reset_after_vecnormalize_sync()
         self._reset_actor_optimizer_state()
 
     def get_broadcast_payload(self) -> FederatedPayload:
@@ -1090,6 +1788,9 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             "actor_state": self._clone_modules(actor_state),
             "prev_actor_state": self._clone_modules(previous_actor),
             "server_direction": self._clone_modules(server_direction),
+            "fedsvrpg_local_update_mode": self.fedsvrpg_local_update_mode,
+            "vecnormalize": self._get_filtered_vecnormalize_state(),
+            "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
             "return": float(self._fedsvrpg_last_return),
         }
 

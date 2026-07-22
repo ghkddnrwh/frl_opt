@@ -1,0 +1,258 @@
+# Fed-AMPO-PPO defaults.
+#
+# Main ablation knobs:
+#   dual_update_mode: adaptive | uniform
+#     - adaptive: paper AMPO projected dual update.
+#     - uniform: fixes lambda_k = 1 / K every round.
+#   critic_sync_mode: local | fedavg | actor_like
+#     - local: paper default, keep each critic client-local.
+#     - fedavg: average final critic parameters on the server.
+#     - actor_like: aggregate critic deltas with the same lambda weights as actor gradients.
+#   vecnormalize_sync_mode: none | obs | reward | obs_reward
+#     - VecNormalize statistics are merged as RunningMeanStd state, not as gradients.
+#   dual_return_source: raw | normalized
+#     - raw keeps the dual update aligned with environment returns even when reward normalization is enabled.
+
+PerturbLunarLander-v3:
+  # n_timesteps: !!float 4e6
+  n_timesteps: !!float 1e6
+  num_clients: 5
+  local_steps: 32
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 1e-3
+  # actor_gradient_mode: cumulative
+
+  batch_size: 8
+  n_envs: 4
+  n_steps: 8
+  policy: 'MlpPolicy'
+  gae_lambda: 0.98
+  gamma: 0.999
+  n_epochs: 4
+  ent_coef: 0.01
+
+
+PerturbMountainCar-v0:
+  n_timesteps: !!float 1e6
+  num_clients: 5
+  local_steps: 16
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 1e-3
+  # actor_gradient_mode: cumulative
+
+  batch_size: 16
+  n_envs: 1
+  n_steps: 16
+  normalize: true
+  policy: 'MlpPolicy'
+  gae_lambda: 0.98
+  gamma: 0.99
+  n_epochs: 4
+  ent_coef: 0.0
+
+PerturbMountainCarContinuous-v0:
+  n_timesteps: !!float 1e5
+  num_clients: 5
+  local_steps: 8
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-4
+  # actor_gradient_mode: cumulative
+
+  n_envs: 1
+  batch_size: 8
+  n_steps: 8
+  normalize: true
+  policy: 'MlpPolicy'
+  gamma: 0.9999
+  learning_rate: !!float 7.77e-05
+  ent_coef: 0.00429
+  clip_range: 0.1
+  n_epochs: 10
+  gae_lambda: 0.9
+  max_grad_norm: 5
+  vf_coef: 0.19
+  use_sde: True
+  policy_kwargs: "dict(log_std_init=-3.29, ortho_init=False)"
+
+PerturbPendulum-v1:
+  n_timesteps: !!float 1e6
+  num_clients: 5
+  local_steps: 128
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-2         
+  # actor_gradient_mode: cumulative
+
+  batch_size: 64
+  n_envs: 4
+  n_steps: 32
+  policy: "MlpPolicy"
+  gae_lambda: 0.95
+  gamma: 0.9
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 1e-3
+  clip_range: 0.2
+  use_sde: True
+  sde_sample_freq: 4
+
+PerturbCartPole-v1:
+  n_timesteps: !!float 1e6
+  num_clients: 5
+  local_steps: 256
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-3
+  # actor_gradient_mode: cumulative
+
+  batch_size: 32
+  n_envs: 2
+  n_steps: 128
+  policy: 'MlpPolicy'
+  gae_lambda: 0.8
+  gamma: 0.98
+  n_epochs: 10
+  ent_coef: 0.0
+  learning_rate: !!float 3e-4
+  clip_range: lin_0.2
+
+PerturbAnt-v4:
+  n_timesteps: !!float 2e6
+  num_clients: 5
+  local_steps: 512
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-3
+  # actor_gradient_mode: cumulative
+
+  batch_size: 16
+  n_envs: 1
+  n_steps: 512
+  normalize: true
+  policy: 'MlpPolicy'
+
+PerturbHalfCheetah-v4:
+  n_timesteps: !!float 2e6
+  num_clients: 5
+  local_steps: 512
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 1e-3
+  # actor_gradient_mode: cumulative
+
+  normalize: true
+  n_envs: 1
+  policy: 'MlpPolicy'
+  batch_size: 16
+  n_steps: 512
+  gamma: 0.98
+  learning_rate: 2.0633e-05
+  ent_coef: 0.000401762
+  clip_range: 0.1
+  n_epochs: 20
+  gae_lambda: 0.92
+  max_grad_norm: 0.8
+  vf_coef: 0.58096
+  policy_kwargs: "dict(
+                    log_std_init=-2,
+                    ortho_init=False,
+                    activation_fn=nn.ReLU,
+                    net_arch=dict(pi=[256, 256], vf=[256, 256])
+                  )"
+
+PerturbHopper-v4:
+  n_timesteps: !!float 2e6
+  num_clients: 5
+  local_steps: 512
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-3
+  # actor_gradient_mode: cumulative
+
+  n_envs: 1
+  batch_size: 64
+  n_steps: 512
+  normalize: true
+  policy: 'MlpPolicy'
+  gamma: 0.99
+  learning_rate: 9.80828e-05
+  ent_coef: 0.00229519
+  clip_range: 0.2
+  n_epochs: 5
+  gae_lambda: 0.99
+  max_grad_norm: 0.7
+  vf_coef: 0.835671
+  policy_kwargs: "dict(
+                    log_std_init=-2,
+                    ortho_init=False,
+                    activation_fn=nn.ReLU,
+                    net_arch=dict(pi=[256, 256], vf=[256, 256])
+                  )"
+
+PerturbWalker2d-v4:
+  n_timesteps: !!float 2e6
+  num_clients: 5
+  local_steps: 512
+  server_update_weight: 1.0
+  dual_lr: 1e-4
+  dual_update_mode: adaptive
+  critic_sync_mode: local
+  vecnormalize_sync_mode: obs_reward
+  dual_return_source: raw
+  # server_actor_lr: !!float 3e-4
+  # actor_gradient_mode: cumulative
+
+  n_envs: 1
+  batch_size: 16
+  n_steps: 512
+  normalize: true
+  policy: 'MlpPolicy'
+  gamma: 0.99
+  learning_rate: 5.05041e-05
+  ent_coef: 0.000585045
+  clip_range: 0.1
+  n_epochs: 20
+  gae_lambda: 0.95
+  max_grad_norm: 1
+  vf_coef: 0.871923
+  policy_kwargs: "dict(
+                    log_std_init=-2,
+                    ortho_init=False,
+                    activation_fn=nn.ReLU,
+                    net_arch=dict(pi=[256, 256], vf=[256, 256])
+                  )"

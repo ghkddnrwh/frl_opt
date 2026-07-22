@@ -3,9 +3,106 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+# plot legend에 표시할 알고리즘 이름
+ALGO_DISPLAY_NAMES = {
+    "ppo_avg": "PPOAvg",
+    "fed_ampo_ppo": "AMPO-PPO",
+    "fed_svrpg_m": "SVRPG-M-PPO",
+    "fed_ampo_local_ppo": "AMPO-PPO-Local",
+}
+
+# 다른 알고리즘의 evaluation 시점을 이 알고리즘에 맞춘다.
+REFERENCE_ALGO_ID = "fed_svrpg_m"
+
+
+def get_npz_scalar(data, key, default=None):
+    """npz 안의 scalar 값을 Python scalar로 읽는다."""
+
+    if key not in data:
+        return default
+
+    value = np.asarray(data[key])
+
+    if value.size == 0:
+        return default
+
+    return value.reshape(-1)[0].item()
+
+
+def make_timestep_axis(data, num_points):
+    """
+    evaluations.npz의 정보를 이용해 x축 timestep을 만든다.
+
+    우선순위:
+        1. timesteps / total_timesteps 등의 직접 저장된 값
+        2. rounds * local_steps * num_clients
+        3. rounds
+        4. 단순 index
+
+    federated RL에서는 모든 client가 사용한 environment interaction을 합한
+    total timestep을 사용한다.
+    """
+
+    direct_timestep_keys = [
+        "timesteps",
+        "total_timesteps",
+        "environment_steps",
+        "env_steps",
+    ]
+
+    for key in direct_timestep_keys:
+        if key in data:
+            return np.asarray(data[key], dtype=float)[:num_points]
+
+    if "rounds" in data:
+        rounds = np.asarray(data["rounds"], dtype=float)[:num_points]
+        local_steps = get_npz_scalar(data, "local_steps", default=None)
+
+        if local_steps is not None:
+            num_clients = get_npz_scalar(data, "num_clients", default=1)
+            return rounds * float(local_steps) * float(num_clients)
+
+        return rounds
+
+    return np.arange(num_points, dtype=float)
+
+
+def prepare_xy(x, curve):
+    """x와 curve의 길이, 정렬, 중복 timestep을 정리한다."""
+
+    x = np.asarray(x, dtype=float).reshape(-1)
+    curve = np.asarray(curve, dtype=float).reshape(-1)
+
+    valid_len = min(len(x), len(curve))
+    x = x[:valid_len]
+    curve = curve[:valid_len]
+
+    valid_mask = np.isfinite(x)
+    x = x[valid_mask]
+    curve = curve[valid_mask]
+
+    order = np.argsort(x)
+    x = x[order]
+    curve = curve[order]
+
+    # timestep은 정수로 저장되는 경우가 대부분이므로 floating-point 오차를 제거한다.
+    if len(x) > 0 and np.allclose(x, np.rint(x)):
+        x = np.rint(x).astype(np.int64)
+
+    # 같은 timestep이 중복 저장되어 있다면 마지막 값을 사용한다.
+    if len(x) > 0:
+        reversed_unique_indices = np.unique(x[::-1], return_index=True)[1]
+        keep_indices = len(x) - 1 - reversed_unique_indices
+        keep_indices = np.sort(keep_indices)
+        x = x[keep_indices]
+        curve = curve[keep_indices]
+
+    return x, curve
+
+
 def load_single_curve(npz_path, metric="nominal"):
     """
-    한 seed의 evaluations.npz에서 round별 metric mean curve를 가져온다.
+    한 seed의 evaluations.npz에서 timestep별 metric mean curve를 가져온다.
 
     metric:
         - nominal
@@ -13,55 +110,72 @@ def load_single_curve(npz_path, metric="nominal"):
         - local_min
 
     return:
-        x: shape (num_rounds,)
-        mean_curve: shape (num_rounds,)
+        x: shape (num_evaluations,)
+        mean_curve: shape (num_evaluations,)
     """
 
-    data = np.load(npz_path)
+    with np.load(npz_path, allow_pickle=True) as data:
+        if metric == "nominal":
+            # nominal_mean: shape (num_evaluations, num_clients) 또는 (num_evaluations,)
+            mean_all = np.array(data["nominal_mean"], dtype=float)
 
-    if metric == "nominal":
-        # nominal_mean: shape (num_rounds, num_clients) 또는 (num_rounds,)
-        mean_all = np.array(data["nominal_mean"], dtype=float)
+            if mean_all.ndim == 2:
+                # 각 evaluation 시점에서 client 평균
+                mean_curve = np.mean(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
 
-        if mean_all.ndim == 2:
-            # 각 round에서 client 평균
-            mean_curve = np.mean(mean_all, axis=1)
+        elif metric == "local_mean":
+            # local_mean: shape (num_evaluations, num_clients) 또는 (num_evaluations,)
+            mean_all = np.array(data["local_mean"], dtype=float)
+
+            if mean_all.ndim == 2:
+                # 각 evaluation 시점에서 client 평균
+                mean_curve = np.mean(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
+
+        elif metric == "local_min":
+            # local_mean에서 각 evaluation 시점별 최소 client 값 사용
+            mean_all = np.array(data["local_mean"], dtype=float)
+
+            if mean_all.ndim == 2:
+                mean_curve = np.min(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
+
         else:
-            mean_curve = mean_all
+            raise ValueError(f"Unknown metric: {metric}")
 
-    elif metric == "local_mean":
-        # local_mean: shape (num_rounds, num_clients) 또는 (num_rounds,)
-        mean_all = np.array(data["local_mean"], dtype=float)
+        x = make_timestep_axis(data=data, num_points=len(mean_curve))
 
-        if mean_all.ndim == 2:
-            # 각 round에서 client 평균
-            mean_curve = np.mean(mean_all, axis=1)
-        else:
-            mean_curve = mean_all
+    return prepare_xy(x, mean_curve)
 
-    elif metric == "local_min":
-        # local_mean에서 각 round별 최소 client 값 사용
-        mean_all = np.array(data["local_mean"], dtype=float)
 
-        if mean_all.ndim == 2:
-            mean_curve = np.min(mean_all, axis=1)
-        else:
-            mean_curve = mean_all
+def align_seed_curves_by_timestep(x_list, curve_list):
+    """여러 seed를 실제 timestep의 교집합에 맞춰 정렬한다."""
 
-    else:
-        raise ValueError(f"Unknown metric: {metric}")
+    common_x = np.asarray(x_list[0])
 
-    num_rounds = len(mean_curve)
+    for x in x_list[1:]:
+        common_x = np.intersect1d(common_x, np.asarray(x))
 
-    # x축
-    if "timesteps" in data:
-        x = np.array(data["timesteps"], dtype=float)[:num_rounds]
-    elif "rounds" in data:
-        x = np.array(data["rounds"], dtype=float)[:num_rounds]
-    else:
-        x = np.arange(num_rounds)
+    if len(common_x) == 0:
+        raise ValueError("No common timesteps were found across seeds.")
 
-    return x, mean_curve
+    aligned_curves = []
+
+    for x, curve in zip(x_list, curve_list):
+        x = np.asarray(x)
+        curve = np.asarray(curve, dtype=float)
+        indices = np.searchsorted(x, common_x)
+
+        if np.any(indices >= len(x)) or not np.array_equal(x[indices], common_x):
+            raise ValueError("Failed to align seed curves by timestep.")
+
+        aligned_curves.append(curve[indices])
+
+    return common_x, np.asarray(aligned_curves, dtype=float)
 
 
 def collect_seed_curves(
@@ -106,11 +220,12 @@ def collect_seed_curves(
     if len(curve_list) == 0:
         return None, None, []
 
-    # seed마다 길이가 다를 수 있으므로 가장 짧은 길이에 맞춤
-    min_len = min(len(curve) for curve in curve_list)
-
-    x = x_list[0][:min_len]
-    seed_curves = np.array([curve[:min_len] for curve in curve_list], dtype=float)
+    # 단순히 가장 짧은 길이로 자르지 않고,
+    # 모든 seed에 실제로 존재하는 timestep의 교집합으로 정렬한다.
+    x, seed_curves = align_seed_curves_by_timestep(
+        x_list=x_list,
+        curve_list=curve_list,
+    )
 
     return x, seed_curves, valid_seeds
 
@@ -217,14 +332,17 @@ def make_unique_plot_label(
 
     normalized_path = os.path.normpath(result_root_path)
     path_parts = normalized_path.split(os.sep)
+    display_name = ALGO_DISPLAY_NAMES.get(algo_id, algo_id)
 
     if algo_id_counts.get(algo_id, 0) > 1:
-        suffix_len = 1
+        # 같은 알고리즘 설정이 여러 개면 마지막 두 폴더를 기본 suffix로 사용한다.
+        # 예: FedAMPO-PPO/uniform/0.0003, FedSVRPG-M-PPO/0.8/0.5
+        suffix_len = min(2, len(path_parts))
         path_suffix = "/".join(path_parts[-suffix_len:])
-        base_label = f"{algo_id}/{path_suffix}"
+        base_label = f"{display_name}/{path_suffix}"
     else:
         suffix_len = 0
-        base_label = algo_id
+        base_label = display_name
 
     plot_label = base_label
 
@@ -233,7 +351,7 @@ def make_unique_plot_label(
 
         if suffix_len <= len(path_parts):
             path_suffix = "/".join(path_parts[-suffix_len:])
-            plot_label = f"{algo_id}/{path_suffix}"
+            plot_label = f"{display_name}/{path_suffix}"
         else:
             plot_label = f"{base_label} #{len(used_plot_labels) + 1}"
             break
@@ -241,6 +359,112 @@ def make_unique_plot_label(
     return plot_label
 
 
+
+
+def get_log_interval(x):
+    """x축에서 대표 evaluation 간격을 계산한다."""
+
+    x = np.asarray(x, dtype=float)
+
+    if len(x) < 2:
+        return None
+
+    positive_diffs = np.diff(x)
+    positive_diffs = positive_diffs[positive_diffs > 0]
+
+    if len(positive_diffs) == 0:
+        return None
+
+    return float(np.median(positive_diffs))
+
+
+def align_algo_data_to_reference(
+    algo_data_list,
+    reference_algo_id=REFERENCE_ALGO_ID,
+):
+    """
+    reference 알고리즘의 evaluation timestep에 모든 알고리즘을 맞춘다.
+
+    algo_data_list:
+        [(algo_id, plot_label, x, seed_curves), ...]
+
+    예:
+        PPOAvg:          10, 20, 30, 40, 50, ...
+        FedSVRPG-M-PPO:  40, 80, 120, ...
+
+    결과:
+        PPOAvg도 40, 80, 120, ... 지점만 사용한다.
+    """
+
+    reference_x_list = [
+        np.asarray(x)
+        for algo_id, _, x, _ in algo_data_list
+        if algo_id == reference_algo_id
+    ]
+
+    if len(reference_x_list) == 0:
+        print(
+            f"[Align] Reference algorithm '{reference_algo_id}' was not loaded. "
+            "Original evaluation timesteps are used."
+        )
+        return algo_data_list
+
+    # FedSVRPG-M 설정이 여러 개이면 모든 설정에 공통으로 존재하는 timestep을 사용한다.
+    reference_x = reference_x_list[0]
+    for x in reference_x_list[1:]:
+        reference_x = np.intersect1d(reference_x, x)
+
+    if len(reference_x) == 0:
+        print(
+            "[Align] FedSVRPG-M-PPO configurations have no common timesteps. "
+            "Original evaluation timesteps are used."
+        )
+        return algo_data_list
+
+    reference_interval = get_log_interval(reference_x)
+    aligned_algo_data_list = []
+
+    print(
+        f"[Align] Reference: {ALGO_DISPLAY_NAMES.get(reference_algo_id, reference_algo_id)}, "
+        f"num_points={len(reference_x)}, interval={reference_interval}"
+    )
+
+    for algo_id, plot_label, x, seed_curves in algo_data_list:
+        x = np.asarray(x)
+        seed_curves = np.asarray(seed_curves, dtype=float)
+        common_x = np.intersect1d(x, reference_x)
+
+        if len(common_x) == 0:
+            print(
+                f"[Align-Warning] {plot_label}: no timestep overlaps with "
+                f"{ALGO_DISPLAY_NAMES.get(reference_algo_id, reference_algo_id)}. "
+                "The original curve is kept."
+            )
+            aligned_algo_data_list.append(
+                (algo_id, plot_label, x, seed_curves)
+            )
+            continue
+
+        indices = np.searchsorted(x, common_x)
+        aligned_seed_curves = seed_curves[:, indices]
+
+        original_interval = get_log_interval(x)
+        ratio_text = "unknown"
+
+        if reference_interval is not None and original_interval is not None:
+            ratio_text = f"{reference_interval / original_interval:.2f}x"
+
+        print(
+            f"        {plot_label}: {len(x)} -> {len(common_x)} points, "
+            f"original_interval={original_interval}, "
+            f"reference/original={ratio_text}"
+        )
+
+        aligned_algo_data_list.append(
+            (algo_id, plot_label, common_x, aligned_seed_curves)
+        )
+
+    return aligned_algo_data_list
 
 
 def normalize_window_size(window_size=None):
@@ -258,17 +482,6 @@ def normalize_window_size(window_size=None):
         raise ValueError(f"window_size must be >= 1, but got {window_size}")
 
     return window_size
-
-
-def make_window_suffix(window_size=None):
-    """window smoothing을 적용한 경우 파일명에 붙일 suffix를 만든다."""
-
-    window_size = normalize_window_size(window_size)
-
-    if window_size <= 1:
-        return ""
-
-    return f"_window{window_size}"
 
 
 def smooth_curve_with_window(curve, window_size=None):
@@ -349,7 +562,6 @@ def plot_seed_average_curve(
     os.makedirs(save_dir, exist_ok=True)
 
     window_size = normalize_window_size(window_size)
-    window_suffix = make_window_suffix(window_size)
 
     # window smoothing은 seed별 curve에 먼저 적용한다.
     # 이후 smoothed seed curves를 기준으로 seed 평균 / seed std를 계산한다.
@@ -381,16 +593,16 @@ def plot_seed_average_curve(
         label="± seed std",
     )
 
-    plt.xlabel("Round / Timesteps")
+    plt.xlabel("Time Steps")
     plt.ylabel("Return")
-    plt.title(f"{algo_id} - {env_id} - {metric}")
     plt.grid(True, alpha=0.3)
     plt.legend()
+    plt.margins(x=0)
     plt.tight_layout()
 
     save_file = os.path.join(
         save_dir,
-        f"{filename_prefix}_{metric}{window_suffix}_learning_curve.png",
+        f"{filename_prefix}_{metric}.png",
     )
 
     plt.savefig(save_file, dpi=300)
@@ -411,7 +623,7 @@ def plot_multiple_algos(
     여러 알고리즘의 seed average curve를 한 plot에 그린다.
 
     algo_data_list:
-        [(plot_label, x, seed_curves), ...]
+        [(algo_id, plot_label, x, seed_curves), ...]
 
     주의:
     - dict를 쓰면 같은 algo_id가 여러 번 있을 때 key가 중복되어 덮어써진다.
@@ -421,11 +633,10 @@ def plot_multiple_algos(
     os.makedirs(save_dir, exist_ok=True)
 
     window_size = normalize_window_size(window_size)
-    window_suffix = make_window_suffix(window_size)
 
     plt.figure(figsize=(12, 6))
 
-    for plot_label, x, seed_curves in algo_data_list:
+    for _, plot_label, x, seed_curves in algo_data_list:
         # window smoothing은 seed별 curve에 먼저 적용한다.
         # 이후 smoothed seed curves를 기준으로 seed 평균 / seed std를 계산한다.
         plot_seed_curves = smooth_seed_curves_with_window(seed_curves, window_size)
@@ -448,19 +659,16 @@ def plot_multiple_algos(
             alpha=0.15,
         )
 
-    plt.xlabel("Round / Timesteps")
+    plt.xlabel("Time Steps")
     plt.ylabel("Return")
-    if window_size > 1:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric} - window={window_size}")
-    else:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric}")
     plt.grid(True, alpha=0.3)
     plt.legend()
+    plt.margins(x=0)
     plt.tight_layout()
 
     save_file = os.path.join(
         save_dir,
-        f"{filename_prefix}_comparison_{metric}{window_suffix}_learning_curve.png",
+        f"{filename_prefix}_{metric}.png",
     )
 
     plt.savefig(save_file, dpi=300)
@@ -539,16 +747,24 @@ def generate_learning_plots(
             )
 
 
+
+#### 
+# Ant-v4 0.85 / 0.000001
+# HalfCheetah-v4 0.9 / 0.0000001
+# Hopper-v4 0.9 / 0.000001
+# Hopper-v4 0.9 / 0.000001
+#### 
+
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbWalker2d-v4"
+    env_id = "PerturbAnt-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
     num_trials = 5
 
     # plot smoothing window
     # - 1 또는 None이면 기존처럼 smoothing 없이 plot
     # - 예: 5, 10, 20 등으로 설정하면 centered moving average 적용
-    plot_window_size = 10
+    plot_window_size = 3
 
     # perturbation_types = ["none", "gravity", "mass", "length"]
     perturbation_types = ["friction", "gravity"]
@@ -561,22 +777,31 @@ def main():
             # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/{env_id}/{perturbation_type}/ppo_avg/none"),
             # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/{env_id}/{perturbation_type}/ppo_avg/none/local"),
 
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.0001"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
+            
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/0.01"),
             
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
             ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/0.0003"),
+            
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_local_ppo/adaptive/0.001"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_local_ppo/adaptive/0.0001"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_local_ppo/adaptive/0.00001"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/revised/{env_id}/{perturbation_type}/fed_ampo_local_ppo/adaptive/0.000001"),
+
+
+
 
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco_long/{env_id}/{perturbation_type}"
+        plot_root_path = f"plots/frl_eh/tuning_mujoco_long/{perturbation_type}"
+        # plot_root_path = f"plots/frl_eh/fed_ampo_final/tuned_mujoco/{perturbation_type}"
 
         # 추가 하위 폴더 인자 묶음
         #
@@ -637,7 +862,15 @@ def main():
                         f"[Info] {plot_label}, {env_id}, {metric}: "
                         f"{len(valid_seeds)} seeds loaded"
                     )
-                    algo_data_list.append((plot_label, x, seed_curves))
+                    algo_data_list.append((algo_id, plot_label, x, seed_curves))
+
+                # FedSVRPG-M-PPO의 evaluation timestep에 다른 알고리즘을 맞춘다.
+                # algo_config_list의 기존 사용 방식은 그대로 유지된다.
+                if len(algo_data_list) > 0:
+                    algo_data_list = align_algo_data_to_reference(
+                        algo_data_list=algo_data_list,
+                        reference_algo_id=REFERENCE_ALGO_ID,
+                    )
 
                 # 수집한 모든 알고리즘을 하나의 플롯에 표시
                 if len(algo_data_list) > 0:

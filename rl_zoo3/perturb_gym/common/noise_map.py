@@ -56,7 +56,7 @@ noise_map: Dict[str, Dict[str, List[str]]] = {
     "PerturbPendulum-v1": {
         "gravity": ["g"],
         "mass": ["m"],
-        "length_wow": ["l"],
+        "length": ["l"],
         "dt": ["dt"],
         "gravity_length_mass": ["g", "m", "l"],
         "all": ["g", "m", "l", "dt"],
