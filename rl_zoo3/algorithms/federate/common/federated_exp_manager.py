@@ -79,6 +79,28 @@ class FederatedExperimentManager(ExperimentManager):
         return str(noise_type)
 
     @staticmethod
+    def _parse_client_noise_values(value: Any) -> list[float]:
+        """Parse explicitly configured perturbation values for each client."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "client_noise_values must be a list of numbers, for example "
+                    "[-0.5, -0.25, 0.0, 0.25, 0.5]"
+                ) from exc
+
+        if not isinstance(value, (list, tuple, np.ndarray)):
+            raise ValueError("client_noise_values must be a list, tuple, or numpy array")
+
+        parsed_values = [float(noise) for noise in value]
+        if not all(math.isfinite(noise) for noise in parsed_values):
+            raise ValueError("client_noise_values must contain only finite numbers")
+        if not all(-1.0 < noise < 1.0 for noise in parsed_values):
+            raise ValueError("Each client_noise_values entry must be in (-1, 1)")
+        return parsed_values
+
+    @staticmethod
     def _as_bool(value: Any) -> bool:
         if isinstance(value, bool):
             return value
@@ -420,10 +442,15 @@ class FederatedExperimentManager(ExperimentManager):
         if "server_update_weight" in hyperparams:
             self.server_update_weight = float(hyperparams.pop("server_update_weight"))
 
+        configured_client_noise_values: list[float] | None = None
         if "perturb_noise_type" in hyperparams:
             self.perturb_noise_type = self._normalize_perturb_noise_type(hyperparams.pop("perturb_noise_type"))
         if "perturb_noise_range" in hyperparams:
             self.perturb_noise_range = float(hyperparams.pop("perturb_noise_range"))
+        if "client_noise_values" in hyperparams:
+            configured_client_noise_values = self._parse_client_noise_values(
+                hyperparams.pop("client_noise_values")
+            )
 
         if "eval_local_episodes" in hyperparams:
             self.eval_local_episodes = int(hyperparams.pop("eval_local_episodes"))
@@ -446,6 +473,17 @@ class FederatedExperimentManager(ExperimentManager):
             raise ValueError("eval_round_freq must be >= 1")
         if not (0.0 <= self.perturb_noise_range < 1.0):
             raise ValueError("perturb_noise_range must be in [0, 1)")
+        if configured_client_noise_values is not None:
+            if self.perturb_noise_type is None:
+                raise ValueError(
+                    "perturb_noise_type must be set when client_noise_values is provided"
+                )
+            if len(configured_client_noise_values) != self.num_clients:
+                raise ValueError(
+                    "client_noise_values length must match num_clients: "
+                    f"got {len(configured_client_noise_values)} values for "
+                    f"{self.num_clients} clients"
+                )
 
         algo_cls = self._get_federated_algo_class()
         if hasattr(algo_cls, "reset_federated_state"):
@@ -456,7 +494,12 @@ class FederatedExperimentManager(ExperimentManager):
         self._base_hyperparams = deepcopy(hyperparams)
         client_n_envs = self._get_client_n_envs()
         server_n_envs = client_n_envs
-        self.client_noise_values = self._sample_client_noises()
+        if configured_client_noise_values is not None:
+            self.client_noise_values = configured_client_noise_values
+            noise_assignment = "explicit"
+        else:
+            self.client_noise_values = self._sample_client_noises()
+            noise_assignment = "sampled"
         self.client_env_kwargs = [self._build_client_env_kwargs(noise) for noise in self.client_noise_values]
 
         if self.verbose > 0 and client_n_envs > 1:
@@ -510,7 +553,8 @@ class FederatedExperimentManager(ExperimentManager):
         if self.verbose > 0 and self.perturb_noise_type is not None:
             print(
                 f"[FRL] client perturbation type={self.perturb_noise_type} "
-                f"range={self.perturb_noise_range} samples={self.client_noise_values}"
+                f"assignment={noise_assignment} range={self.perturb_noise_range} "
+                f"values={self.client_noise_values}"
             )
 
         self._save_config(saved_hyperparams)

@@ -13,10 +13,10 @@ first_args=("gravity" "friction") # Pendulum-v1
 second_args=(512)
 
 # third_args=(0.0003 0.001 0.003)
-third_args=(0.5)
+third_args=(0.7 0.8 0.9)
 # third_args=(8)
 # fourth_args=(0.0001 0.001 0.01 0.1)
-fourth_args=(0.001 0.0001 0.00001 0.000001)
+fourth_args=(0.00001 0.000001)
 # fourth_args=(0.0001 0.0003 0.001)
 
 
@@ -190,7 +190,7 @@ do
                 # wait
 
 
-                for i in {1..3}
+                for i in {4..5}
                 # for i in 3
                 do
                     # python rl_zoo3/train.py --algo ppo_avg --env PerturbHopper-v4 \
@@ -245,11 +245,19 @@ do
                     #     --seed $i --frl --log-wandb True --device "cpu" &
                     # sleep 3
 
+                    # python rl_zoo3/train.py --algo fed_ampo_local_ppo --env PerturbAnt-v4 \
+                    #     --log-folder "logs/fed_ampo/tuned_mujoco/revised/PerturbAnt-v4/${first_arg}/fed_ampo_local_ppo/adaptive/${fourth_arg}" \
+                    #     --hyperparams 'dual_update_mode:"adaptive"' n_timesteps:10e6 "perturb_noise_type:\"${first_arg}\"" perturb_noise_range:0.5 local_steps:${second_arg} \
+                    #         n_steps:${second_arg} eval_round_freq:$(python -c "import math; print(math.ceil(25000 / 5 / $second_arg))") \
+                    #         dual_lr:${fourth_arg} \
+                    #     --seed $i --frl --log-wandb True --device "cpu" &
+                    # sleep 3
+
                     python rl_zoo3/train.py --algo fed_ampo_local_ppo --env PerturbAnt-v4 \
-                        --log-folder "logs/fed_ampo/tuned_mujoco/revised/PerturbAnt-v4/${first_arg}/fed_ampo_local_ppo/adaptive/${fourth_arg}" \
+                        --log-folder "logs/fed_ampo/tuned_mujoco/revised/PerturbAnt-v4/${first_arg}/fed_ampo_local_ppo/adaptive/momentum/${fourth_arg}/${third_arg}" \
                         --hyperparams 'dual_update_mode:"adaptive"' n_timesteps:10e6 "perturb_noise_type:\"${first_arg}\"" perturb_noise_range:0.5 local_steps:${second_arg} \
                             n_steps:${second_arg} eval_round_freq:$(python -c "import math; print(math.ceil(25000 / 5 / $second_arg))") \
-                            dual_lr:${fourth_arg} \
+                            'local_actor_update_mode:"momentum"' dual_lr:${fourth_arg} momentum_beta:${third_arg} \
                         --seed $i --frl --log-wandb True --device "cpu" &
                     sleep 3
 

@@ -21,10 +21,14 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.sb2_compat.rmsprop_tf_like import RMSpropTFLike  # noqa: F401
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv, VecFrameStack, VecNormalize
 
+from rl_zoo3.icml.icml_d2mc import ICMLD2MC
+
 import rl_zoo3.register
 
 from rl_zoo3.algorithms.federate import FEDERATE_ALGOS
 from rl_zoo3.algorithms.protester import PROTESTER_ALGOS
+
+from rl_zoo3.neurips2026.wd3 import WD3
 
 # For custom activation fn
 from torch import nn as nn
@@ -46,6 +50,9 @@ ALGOS: dict[str, type[BaseAlgorithm]] = {
 
     **FEDERATE_ALGOS,
     **PROTESTER_ALGOS,
+
+    "icml_d2mc": ICMLD2MC,
+    "wd3": WD3,
 }
 
 
