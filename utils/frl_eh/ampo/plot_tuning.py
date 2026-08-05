@@ -637,7 +637,7 @@ def main():
     # env_id_list = ["PerturbPendulum-v1"]
     env_id = "PerturbWalker2d-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
-    num_trials = 3
+    num_trials = 5
 
     # plot smoothing window
     # - 1 또는 None이면 기존처럼 smoothing 없이 plot
@@ -670,15 +670,26 @@ def main():
 
             # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.2/0.5"),
             # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.5/0.5"),
-            ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
+            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
             # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-            ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
+            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
             # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
-            ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),
+            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),
+
+
+            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/ppo_avg"),
+
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
+            
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
+
+
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco/{env_id}/{perturbation_type}"
+        plot_root_path = f"plots/frl_eh/tuning_mujoco/noise_assignment/{env_id}/{perturbation_type}"
 
         # 추가 하위 폴더 인자 묶음
         #
