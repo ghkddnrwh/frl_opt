@@ -143,6 +143,7 @@ PerturbAnt-v4: &mujoco-defaults
   local_steps: 512
   server_update_weight: 1.0
 
+  n_envs: 1
   batch_size: 16
   n_steps: 512
   normalize: true
