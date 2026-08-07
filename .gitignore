@@ -46,3 +46,5 @@ venv.bak/
 
 logs/
 plots/
+
+*.sh
