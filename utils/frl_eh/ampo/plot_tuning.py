@@ -88,7 +88,169 @@ def make_timesteps_from_npz(data, num_rounds, metric_array=None):
     return np.arange(num_rounds, dtype=float)
 
 
-def load_single_curve(npz_path, metric="nominal"):
+def normalize_eval_round_freq(eval_round_freq):
+    """사용자가 지정한 evaluation round 주기를 양의 정수로 정규화한다."""
+
+    if eval_round_freq is None:
+        return None
+
+    value = float(eval_round_freq)
+    rounded = int(round(value))
+
+    if not np.isfinite(value) or value <= 0 or not np.isclose(value, rounded):
+        raise ValueError(
+            f"eval_round_freq must be a positive integer, but got {eval_round_freq}"
+        )
+
+    return rounded
+
+
+def get_logged_eval_round_freq(data, rounds):
+    """
+    한 evaluations.npz가 실제로 저장한 evaluation round 주기를 가져온다.
+
+    우선순위:
+        1. eval_round_freq.npy
+        2. 없으면 rounds의 positive diff median으로 추정
+
+    마지막 학습 round를 강제로 평가해서
+    rounds가 [..., 3880, 3907]처럼 끝나더라도 median을 사용하므로
+    정규 evaluation 주기(예: 40)를 안정적으로 추정할 수 있다.
+    """
+
+    logged_freq = read_scalar_from_npz(data, "eval_round_freq", default=None)
+
+    if logged_freq is not None:
+        value = float(logged_freq)
+        rounded = int(round(value))
+        if not np.isfinite(value) or value <= 0 or not np.isclose(value, rounded):
+            raise ValueError(
+                f"Invalid eval_round_freq in evaluations.npz: {logged_freq}"
+            )
+        return rounded
+
+    rounds = np.asarray(rounds, dtype=float).reshape(-1)
+    diffs = np.diff(rounds)
+    positive_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+
+    if len(positive_diffs) == 0:
+        raise ValueError(
+            "eval_round_freq is missing and it cannot be inferred from rounds."
+        )
+
+    value = float(np.median(positive_diffs))
+    rounded = int(round(value))
+
+    if not np.isclose(value, rounded):
+        raise ValueError(
+            "eval_round_freq is missing and the inferred round spacing is not an integer: "
+            f"{value}"
+        )
+
+    return rounded
+
+
+def select_exact_eval_rounds(data, x, curve, requested_eval_round_freq):
+    """
+    requested_eval_round_freq에 정확히 해당하는 실제 저장값만 선택한다.
+
+    예:
+        seed A logged freq = 10
+        seed B logged freq = 40
+        requested freq     = 80
+
+    -> 두 seed 모두 round 80, 160, 240, ... 의 실제 저장값만 사용한다.
+
+    중요:
+    - 보간(interpolation)은 절대 하지 않는다.
+    - requested freq가 logged freq의 정수배가 아니면 ValueError.
+      예: logged=30, requested=80 -> error
+    - 배수 관계여도 실제로 필요한 round가 파일에 빠져 있으면 ValueError.
+    """
+
+    requested_eval_round_freq = normalize_eval_round_freq(requested_eval_round_freq)
+
+    x = np.asarray(x, dtype=float).reshape(-1)
+    curve = np.asarray(curve, dtype=float).reshape(-1)
+
+    if "rounds" not in data:
+        raise ValueError(
+            "Strict eval_round_freq selection requires 'rounds' in evaluations.npz."
+        )
+
+    rounds = np.asarray(data["rounds"], dtype=float).reshape(-1)
+
+    usable_len = min(len(rounds), len(x), len(curve))
+    rounds = rounds[:usable_len]
+    x = x[:usable_len]
+    curve = curve[:usable_len]
+
+    if usable_len == 0:
+        raise ValueError("No evaluation data exists in evaluations.npz.")
+
+    if not np.all(np.isfinite(rounds)):
+        raise ValueError("rounds contains NaN or inf values.")
+
+    rounded_rounds = np.rint(rounds).astype(np.int64)
+    if not np.allclose(rounds, rounded_rounds):
+        raise ValueError("rounds must contain integer-valued round numbers.")
+
+    logged_eval_round_freq = get_logged_eval_round_freq(data, rounded_rounds)
+
+    if requested_eval_round_freq % logged_eval_round_freq != 0:
+        raise ValueError(
+            "Requested eval_round_freq is incompatible with this seed: "
+            f"requested={requested_eval_round_freq}, "
+            f"logged={logged_eval_round_freq}. "
+            "The requested frequency must be an integer multiple of the logged frequency "
+            "because interpolation is disabled."
+        )
+
+    # 사용자가 요청한 정확한 round들만 선택한다.
+    exact_mask = (rounded_rounds % requested_eval_round_freq) == 0
+    selected_rounds = rounded_rounds[exact_mask]
+    selected_x = x[exact_mask]
+    selected_curve = curve[exact_mask]
+
+    if len(selected_rounds) == 0:
+        raise ValueError(
+            f"No rounds matching eval_round_freq={requested_eval_round_freq} exist "
+            f"in the logged range [{rounded_rounds.min()}, {rounded_rounds.max()}]."
+        )
+
+    # 파일이 커버하는 범위 안에서 존재해야 하는 requested round가 실제로 모두 있는지 검사한다.
+    # 마지막 round가 eval 주기와 무관한 강제 final evaluation이어도 문제없도록
+    # requested freq의 배수들만 expected로 만든다.
+    first_expected = (
+        (int(rounded_rounds.min()) + requested_eval_round_freq - 1)
+        // requested_eval_round_freq
+    ) * requested_eval_round_freq
+    last_expected = (
+        int(rounded_rounds.max()) // requested_eval_round_freq
+    ) * requested_eval_round_freq
+
+    if first_expected <= last_expected:
+        expected_rounds = np.arange(
+            first_expected,
+            last_expected + 1,
+            requested_eval_round_freq,
+            dtype=np.int64,
+        )
+        missing_rounds = np.setdiff1d(expected_rounds, selected_rounds)
+
+        if len(missing_rounds) > 0:
+            preview = missing_rounds[:10].tolist()
+            more = " ..." if len(missing_rounds) > 10 else ""
+            raise ValueError(
+                f"Missing exact evaluation rounds for requested eval_round_freq="
+                f"{requested_eval_round_freq}: {preview}{more}. "
+                "Interpolation is disabled, so the curve cannot be constructed."
+            )
+
+    return selected_x, selected_curve, selected_rounds, logged_eval_round_freq
+
+
+def load_single_curve(npz_path, metric="nominal", eval_round_freq=None):
     """
     한 seed의 evaluations.npz에서 round별 metric mean curve를 가져온다.
 
@@ -97,58 +259,133 @@ def load_single_curve(npz_path, metric="nominal"):
         - local_mean
         - local_min
 
+    eval_round_freq:
+        - None: 파일에 저장된 모든 evaluation point 사용
+        - 정수: 해당 round 주기의 실제 저장값만 사용
+          예: 80 -> rounds 80, 160, 240, ... 만 사용
+
     return:
-        x: shape (num_rounds,)
-           timesteps 기준 x축
-        mean_curve: shape (num_rounds,)
+        x: timesteps 기준 x축
+        mean_curve: 선택된 metric curve
+        rounds: 선택된 실제 round 번호
+        logged_eval_round_freq: 해당 seed의 원래 evaluation 저장 주기
     """
 
-    data = np.load(npz_path, allow_pickle=True)
+    with np.load(npz_path, allow_pickle=True) as data:
+        if metric == "nominal":
+            mean_all = np.array(data["nominal_mean"], dtype=float)
 
-    if metric == "nominal":
-        # nominal_mean: shape (num_rounds, num_clients) 또는 (num_rounds,)
-        mean_all = np.array(data["nominal_mean"], dtype=float)
+            if mean_all.ndim == 2:
+                mean_curve = np.mean(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
 
-        if mean_all.ndim == 2:
-            # 각 round에서 client 평균
-            mean_curve = np.mean(mean_all, axis=1)
+        elif metric == "local_mean":
+            mean_all = np.array(data["local_mean"], dtype=float)
+
+            if mean_all.ndim == 2:
+                mean_curve = np.mean(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
+
+        elif metric == "local_min":
+            mean_all = np.array(data["local_mean"], dtype=float)
+
+            if mean_all.ndim == 2:
+                mean_curve = np.min(mean_all, axis=1)
+            else:
+                mean_curve = mean_all
+
         else:
-            mean_curve = mean_all
+            raise ValueError(f"Unknown metric: {metric}")
 
-    elif metric == "local_mean":
-        # local_mean: shape (num_rounds, num_clients) 또는 (num_rounds,)
-        mean_all = np.array(data["local_mean"], dtype=float)
+        num_rounds = len(mean_curve)
 
-        if mean_all.ndim == 2:
-            # 각 round에서 client 평균
-            mean_curve = np.mean(mean_all, axis=1)
+        x = make_timesteps_from_npz(
+            data=data,
+            num_rounds=num_rounds,
+            metric_array=mean_all,
+        )
+
+        if "rounds" in data:
+            rounds = np.asarray(data["rounds"], dtype=float)[:num_rounds]
         else:
-            mean_curve = mean_all
+            rounds = np.arange(num_rounds, dtype=float)
 
-    elif metric == "local_min":
-        # local_mean에서 각 round별 최소 client 값 사용
-        mean_all = np.array(data["local_mean"], dtype=float)
+        if eval_round_freq is None:
+            logged_eval_round_freq = (
+                get_logged_eval_round_freq(data, rounds)
+                if "rounds" in data
+                else None
+            )
+            return x, mean_curve, rounds, logged_eval_round_freq
 
-        if mean_all.ndim == 2:
-            mean_curve = np.min(mean_all, axis=1)
-        else:
-            mean_curve = mean_all
+        return select_exact_eval_rounds(
+            data=data,
+            x=x,
+            curve=mean_curve,
+            requested_eval_round_freq=eval_round_freq,
+        )
 
-    else:
-        raise ValueError(f"Unknown metric: {metric}")
 
-    num_rounds = len(mean_curve)
+def align_seed_curves_by_round_exact(x_list, curve_list, rounds_list):
+    """
+    여러 seed를 실제 round 번호 기준으로 정확히 정렬한다.
 
-    # x축:
-    # evaluations.npz 내부의 timesteps가 있으면 그대로 사용하고,
-    # 없으면 rounds * local_steps * num_clients로 자동 생성한다.
-    x = make_timesteps_from_npz(
-        data=data,
-        num_rounds=num_rounds,
-        metric_array=mean_all,
-    )
+    - 보간하지 않는다.
+    - 모든 seed에 실제로 존재하는 공통 round만 사용한다.
+    - 같은 round가 seed마다 다른 timestep에 대응하면 ValueError를 발생시킨다.
+    """
 
-    return x, mean_curve
+    if not (len(x_list) == len(curve_list) == len(rounds_list)):
+        raise ValueError("x_list, curve_list, and rounds_list must have the same length.")
+
+    if len(rounds_list) == 0:
+        raise ValueError("No seed curves to align.")
+
+    normalized = []
+    for x, curve, rounds in zip(x_list, curve_list, rounds_list):
+        x = np.asarray(x, dtype=float).reshape(-1)
+        curve = np.asarray(curve, dtype=float).reshape(-1)
+        rounds = np.asarray(rounds, dtype=np.int64).reshape(-1)
+
+        usable_len = min(len(x), len(curve), len(rounds))
+        x = x[:usable_len]
+        curve = curve[:usable_len]
+        rounds = rounds[:usable_len]
+
+        if len(np.unique(rounds)) != len(rounds):
+            raise ValueError("Duplicate round values exist in a seed after filtering.")
+
+        order = np.argsort(rounds, kind="stable")
+        normalized.append((x[order], curve[order], rounds[order]))
+
+    common_rounds = normalized[0][2]
+    for _, _, rounds in normalized[1:]:
+        common_rounds = np.intersect1d(common_rounds, rounds, assume_unique=True)
+
+    if len(common_rounds) == 0:
+        raise ValueError("No exact common evaluation rounds exist across seeds.")
+
+    aligned_x = []
+    aligned_curves = []
+
+    for x, curve, rounds in normalized:
+        index_by_round = {int(r): i for i, r in enumerate(rounds)}
+        indices = np.array([index_by_round[int(r)] for r in common_rounds], dtype=int)
+        aligned_x.append(x[indices])
+        aligned_curves.append(curve[indices])
+
+    reference_x = aligned_x[0]
+    for seed_idx, seed_x in enumerate(aligned_x[1:], start=2):
+        if not np.allclose(seed_x, reference_x, rtol=1e-9, atol=1e-9, equal_nan=False):
+            raise ValueError(
+                "The same evaluation rounds map to different timestep x-values across seeds. "
+                f"Mismatch detected at seed index {seed_idx}. "
+                "Check local_steps, num_clients, or saved timesteps."
+            )
+
+    return reference_x, np.vstack(aligned_curves), common_rounds
 
 
 def collect_seed_curves(
@@ -157,17 +394,29 @@ def collect_seed_curves(
     result_root_path,
     metric,
     num_trials,
+    eval_round_freq=None,
 ):
     """
     여러 seed의 mean curve를 모은다.
+
+    eval_round_freq를 지정하면 모든 seed에서 그 주기의 실제 round만 사용한다.
+    예: eval_round_freq=80 -> 80, 160, 240, ...
+
+    seed의 원래 eval_round_freq가 요청값을 정확히 만들 수 없거나,
+    필요한 round가 실제 파일에 없으면 ValueError를 발생시킨다.
+    보간은 사용하지 않는다.
 
     expected path:
         {result_root_path}/{algo_id}/{env_id}_{seed}/evaluations.npz
     """
 
+    eval_round_freq = normalize_eval_round_freq(eval_round_freq)
+
     x_list = []
     curve_list = []
+    rounds_list = []
     valid_seeds = []
+    logged_freqs = []
 
     for seed in range(1, num_trials + 1):
         npz_path = os.path.join(
@@ -182,27 +431,46 @@ def collect_seed_curves(
             continue
 
         try:
-            x, mean_curve = load_single_curve(npz_path=npz_path, metric=metric)
-            x_list.append(x)
-            curve_list.append(mean_curve)
-            valid_seeds.append(seed)
+            x, mean_curve, rounds, logged_freq = load_single_curve(
+                npz_path=npz_path,
+                metric=metric,
+                eval_round_freq=eval_round_freq,
+            )
+        except ValueError as e:
+            # eval_round_freq 불일치/누락은 조용히 seed를 건너뛰면 안 된다.
+            # 사용자가 잘못된 평균 plot을 보지 않도록 즉시 중단한다.
+            raise ValueError(
+                f"Failed to load seed {seed} strictly: {npz_path}\n{e}"
+            ) from e
         except Exception as e:
             print(f"[Error] seed {seed}: {npz_path}")
             print(f"        {e}")
+            continue
+
+        x_list.append(x)
+        curve_list.append(mean_curve)
+        rounds_list.append(np.asarray(rounds, dtype=np.int64))
+        valid_seeds.append(seed)
+        logged_freqs.append(logged_freq)
 
     if len(curve_list) == 0:
         return None, None, []
 
-    # seed마다 길이가 다를 수 있으므로 가장 짧은 길이에 맞춤
-    min_len = min(
-        min(len(x) for x in x_list),
-        min(len(curve) for curve in curve_list),
+    x, seed_curves, common_rounds = align_seed_curves_by_round_exact(
+        x_list=x_list,
+        curve_list=curve_list,
+        rounds_list=rounds_list,
     )
 
-    x = x_list[0][:min_len]
-    seed_curves = np.array(
-        [curve[:min_len] for curve in curve_list],
-        dtype=float,
+    freq_info = ", ".join(
+        f"seed {seed}: {freq}" for seed, freq in zip(valid_seeds, logged_freqs)
+    )
+    requested_text = "all" if eval_round_freq is None else str(eval_round_freq)
+
+    print(
+        f"[Exact Eval Round] requested={requested_text}; "
+        f"logged=({freq_info}); common points={len(common_rounds)}; "
+        f"round range={common_rounds[0]}..{common_rounds[-1]}"
     )
 
     return x, seed_curves, valid_seeds
@@ -572,6 +840,7 @@ def generate_learning_plots(
     metric_list,
     extra_args=None,
     window_size=None,
+    eval_round_freq=None,
 ):
     """
     env별, metric별 learning curve를 저장한다.
@@ -610,6 +879,7 @@ def generate_learning_plots(
                 result_root_path=result_save_root,
                 metric=metric,
                 num_trials=num_trials,
+                eval_round_freq=eval_round_freq,
             )
 
             if seed_curves is None:
@@ -643,6 +913,12 @@ def main():
     # - 1 또는 None이면 기존처럼 smoothing 없이 plot
     # - 예: 5, 10, 20 등으로 설정하면 centered moving average 적용
     plot_window_size = 1
+
+    # plot에 사용할 evaluation round 주기
+    # 예: 80이면 모든 seed에서 round 80, 160, 240, ... 의 실제 저장값만 사용
+    # seed의 원래 eval_round_freq가 80의 약수가 아니면 ValueError 발생
+    # (예: logged=30, requested=80 -> error)
+    plot_eval_round_freq = 80
 
     # perturbation_types = ["none", "gravity", "mass", "length"]
     perturbation_types = ["gravity", "friction"]
@@ -679,10 +955,12 @@ def main():
 
             ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/ppo_avg"),
 
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
             ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
             ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
             ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
             
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
@@ -741,6 +1019,7 @@ def main():
                         result_root_path=result_root_with_args,
                         metric=metric,
                         num_trials=num_trials,
+                        eval_round_freq=plot_eval_round_freq,
                     )
 
                     if seed_curves is None:
