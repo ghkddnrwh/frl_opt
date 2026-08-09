@@ -69,6 +69,7 @@ class PPOAvg(FederatedAlgorithmMixin, PPO):
         self.vecnormalize_sync_mode = self._normalize_vecnormalize_sync_mode(
             kwargs.pop("vecnormalize_sync_mode", "obs_reward")
         )
+        self._federated_progress_lock: float | None = None
 
         for key in self.federated_manager_keys:
             kwargs.pop(key, None)
@@ -82,6 +83,21 @@ class PPOAvg(FederatedAlgorithmMixin, PPO):
     @classmethod
     def uses_federated_client_n_envs(cls) -> bool:
         return True
+
+    def prepare_federated_training(self, clients: Sequence[FederatedAlgorithmMixin]) -> None:
+        del clients
+        if self.vecnormalize_sync_mode == "none":
+            type(self)._last_global_vecnormalize_state = None
+            return
+        type(self)._last_global_vecnormalize_state = type(self)._clone_state(
+            self._get_filtered_vecnormalize_state()
+        )
+
+    def _update_current_progress_remaining(self, num_timesteps: int, total_timesteps: int) -> None:
+        if self._federated_progress_lock is None:
+            super()._update_current_progress_remaining(num_timesteps, total_timesteps)
+            return
+        self._current_progress_remaining = self._federated_progress_lock
 
     @classmethod
     def _normalize_critic_sync_mode(cls, mode: str) -> str:
@@ -194,7 +210,11 @@ class PPOAvg(FederatedAlgorithmMixin, PPO):
         PPO, the realized amount of data is quantized by ``n_steps * n_envs``
         because rollouts are collected in fixed-size batches.
         """
-        self.learn(total_timesteps=local_steps, **kwargs)
+        self._federated_progress_lock = float(self._current_progress_remaining)
+        try:
+            self.learn(total_timesteps=local_steps, **kwargs)
+        finally:
+            self._federated_progress_lock = None
 
     def _get_module_states(self) -> FederatedModules:
         """Return the policy entries that participate in server aggregation.
@@ -327,6 +347,10 @@ class PPOAvg(FederatedAlgorithmMixin, PPO):
         if vecnormalize is None:
             return
 
+        current_original_obs = None
+        if self._last_obs is not None:
+            current_original_obs = vecnormalize.get_original_obs()
+
         # Keep the wrapper configuration aligned across server and clients.
         for attr in ("norm_obs", "norm_reward", "clip_obs", "clip_reward", "gamma", "epsilon", "training"):
             if attr in state:
@@ -337,20 +361,14 @@ class PPOAvg(FederatedAlgorithmMixin, PPO):
         if state.get("ret_rms") is not None and getattr(vecnormalize, "ret_rms", None) is not None:
             self._set_rms_state(vecnormalize.ret_rms, state["ret_rms"])
 
-        # VecNormalize.returns is a transient discounted-return accumulator.
-        # SB3 does not pickle it when saving VecNormalize, so after synchronizing
-        # global ret_rms it is safer to restart the accumulator than to average it.
-        if getattr(vecnormalize, "returns", None) is not None:
-            vecnormalize.returns = np.zeros_like(vecnormalize.returns)
+        if current_original_obs is not None:
+            self._last_obs = vecnormalize.normalize_obs(current_original_obs)
+            self._last_original_obs = current_original_obs
 
     def _reset_after_parameter_sync(self) -> None:
         """Drop PPO state that is stale after replacing policy/normalizer state."""
         if hasattr(self.policy, "optimizer"):
             self.policy.optimizer.state.clear()
-
-        self._last_obs = None
-        self._last_original_obs = None
-        self._last_episode_starts = None
 
     @staticmethod
     def _clone_state(state: Any) -> Any:

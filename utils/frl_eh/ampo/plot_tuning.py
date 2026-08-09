@@ -750,7 +750,7 @@ def plot_seed_average_curve(
 
     save_file = os.path.join(
         save_dir,
-        f"{filename_prefix}_{metric}{window_suffix}_learning_curve.png",
+        f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
     plt.savefig(save_file, dpi=300)
@@ -822,7 +822,7 @@ def plot_multiple_algos(
 
     save_file = os.path.join(
         save_dir,
-        f"{filename_prefix}_comparison_{metric}{window_suffix}_learning_curve.png",
+        f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
     plt.savefig(save_file, dpi=300)
@@ -905,20 +905,20 @@ def generate_learning_plots(
 
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbWalker2d-v4"
+    env_id = "PerturbAnt-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
     num_trials = 5
 
     # plot smoothing window
     # - 1 또는 None이면 기존처럼 smoothing 없이 plot
     # - 예: 5, 10, 20 등으로 설정하면 centered moving average 적용
-    plot_window_size = 1
+    plot_window_size = 3
 
     # plot에 사용할 evaluation round 주기
     # 예: 80이면 모든 seed에서 round 80, 160, 240, ... 의 실제 저장값만 사용
     # seed의 원래 eval_round_freq가 80의 약수가 아니면 ValueError 발생
     # (예: logged=30, requested=80 -> error)
-    plot_eval_round_freq = 80
+    plot_eval_round_freq = 40
 
     # perturbation_types = ["none", "gravity", "mass", "length"]
     perturbation_types = ["gravity", "friction"]
@@ -955,15 +955,15 @@ def main():
 
             ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/ppo_avg"),
 
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
             
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
 
 
         ]
