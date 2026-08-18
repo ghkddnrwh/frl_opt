@@ -435,12 +435,12 @@ Hopper-v4:
   gae_lambda: 0.99
   max_grad_norm: 0.7
   vf_coef: 0.835671
-  policy_kwargs: "dict(
-                    log_std_init=-2,
-                    ortho_init=False,
-                    activation_fn=nn.ReLU,
-                    net_arch=dict(pi=[256, 256], vf=[256, 256])
-                  )"
+  # policy_kwargs: "dict(
+  #                   log_std_init=-2,
+  #                   ortho_init=False,
+  #                   activation_fn=nn.ReLU,
+  #                   net_arch=dict(pi=[256, 256], vf=[256, 256])
+  #                 )"
 
 HumanoidStandup-v2:
   normalize: true

@@ -162,6 +162,7 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         self.fedsvrpg_local_update_mode = self._normalize_fedsvrpg_local_update_mode(
             kwargs.pop("fedsvrpg_local_update_mode", "ppo_update")
         )
+        self._federated_progress_lock: float | None = None
 
         # Kept for compatibility with previous config files.
         kwargs.pop("local_iteration_horizon", None)
@@ -205,6 +206,12 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     @classmethod
     def reset_federated_state(cls) -> None:
         cls._last_global_vecnormalize_state = None
+
+    def _update_current_progress_remaining(self, num_timesteps: int, total_timesteps: int) -> None:
+        if self._federated_progress_lock is None:
+            super()._update_current_progress_remaining(num_timesteps, total_timesteps)
+            return
+        self._current_progress_remaining = self._federated_progress_lock
 
     @classmethod
     def _normalize_vecnormalize_sync_mode(cls, mode: str) -> str:
@@ -421,13 +428,17 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         return state
 
     def _set_vecnormalize_state(self, state: VecNormalizeState | None) -> None:
-        """Apply VecNormalize statistics to this model's env, if present."""
+        """Apply VecNormalize statistics while preserving the current environment trajectory."""
         if state is None:
             return
 
         vecnormalize = self.get_vec_normalize_env()
         if vecnormalize is None:
             return
+
+        current_original_obs = None
+        if self._last_obs is not None:
+            current_original_obs = vecnormalize.get_original_obs()
 
         for attr in ("norm_obs", "norm_reward", "clip_obs", "clip_reward", "gamma", "epsilon", "training"):
             if attr in state:
@@ -438,14 +449,12 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         if state.get("ret_rms") is not None and getattr(vecnormalize, "ret_rms", None) is not None:
             self._set_rms_state(vecnormalize.ret_rms, state["ret_rms"])
 
-        if getattr(vecnormalize, "returns", None) is not None:
-            vecnormalize.returns = np.zeros_like(vecnormalize.returns)
+        if current_original_obs is not None:
+            self._last_obs = vecnormalize.normalize_obs(current_original_obs)
+            self._last_original_obs = self._clone_state(current_original_obs)
 
     def _reset_after_vecnormalize_sync(self) -> None:
-        """Drop rollout observations that were normalized with stale statistics."""
-        self._last_obs = None
-        self._last_original_obs = None
-        self._last_episode_starts = None
+        return
 
     @staticmethod
     def _clone_state(state: Any) -> Any:
@@ -1386,6 +1395,13 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         client_metrics: list[dict[str, float]] = []
         theta0_actor = self._get_actor_state()
 
+        if self.vecnormalize_sync_mode == "none":
+            type(self)._last_global_vecnormalize_state = None
+        else:
+            type(self)._last_global_vecnormalize_state = type(self)._clone_state(
+                self._get_filtered_vecnormalize_state()
+            )
+
         # In the default practical PPO backend with beta=1, the SVRPG anchor is
         # unused.  Skipping the extra u0 rollout makes the beta=1 path much
         # closer to PPOAvg: no pre-training rollout is collected solely for
@@ -1422,7 +1438,12 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             client._set_actor_state(theta0_actor)
             client._fedsvrpg_prev_global_actor_state = client._clone_modules(theta0_actor)
             client._fedsvrpg_round_start_actor_state = client._clone_modules(theta0_actor)
-            direction, metrics = client._estimate_initial_actor_direction()
+            previous_progress_lock = client._federated_progress_lock
+            client._federated_progress_lock = float(client._current_progress_remaining)
+            try:
+                direction, metrics = client._estimate_initial_actor_direction()
+            finally:
+                client._federated_progress_lock = previous_progress_lock
             client_directions.append(direction)
             client_weights.append(float(client.get_client_weight()))
             client_metrics.append(metrics)
@@ -1479,146 +1500,151 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     # Federated client side
     # ------------------------------------------------------------------
     def federated_local_update(self, local_steps: int, **kwargs) -> None:
-        del kwargs
+        self._federated_progress_lock = float(self._current_progress_remaining)
+        try:
+            del kwargs
 
-        target_steps = int(local_steps)
-        if target_steps <= 0:
-            raise ValueError(f"local_steps must be positive, got {local_steps}")
+            target_steps = int(local_steps)
+            if target_steps <= 0:
+                raise ValueError(f"local_steps must be positive, got {local_steps}")
 
-        actor_before_round = self._get_actor_state()
-        self._fedsvrpg_round_start_actor_state = self._clone_modules(actor_before_round)
+            actor_before_round = self._get_actor_state()
+            self._fedsvrpg_round_start_actor_state = self._clone_modules(actor_before_round)
 
-        previous_global_actor = self._fedsvrpg_prev_global_actor_state
-        if previous_global_actor is None:
-            previous_global_actor = self._clone_modules(actor_before_round)
+            previous_global_actor = self._fedsvrpg_prev_global_actor_state
+            if previous_global_actor is None:
+                previous_global_actor = self._clone_modules(actor_before_round)
 
-        server_direction = self._fedsvrpg_server_direction
-        if server_direction is None:
-            server_direction = self._zero_like_actor_state()
+            server_direction = self._fedsvrpg_server_direction
+            if server_direction is None:
+                server_direction = self._zero_like_actor_state()
 
-        collected_steps = 0
-        num_local_updates = 0
-        local_returns: list[float] = []
-        update_norms: list[float] = []
-        ppo_delta_norms: list[float] = []
-        current_delta_norms: list[float] = []
-        correction_norms: list[float] = []
-        is_weight_means: list[float] = []
-        is_weight_maxs: list[float] = []
+            collected_steps = 0
+            num_local_updates = 0
+            local_returns: list[float] = []
+            update_norms: list[float] = []
+            ppo_delta_norms: list[float] = []
+            current_delta_norms: list[float] = []
+            correction_norms: list[float] = []
+            is_weight_means: list[float] = []
+            is_weight_maxs: list[float] = []
 
-        while collected_steps < target_steps:
-            rollout_return = self._collect_one_rollout()
-            current_actor = self._get_actor_state()
+            while collected_steps < target_steps:
+                rollout_return = self._collect_one_rollout()
+                current_actor = self._get_actor_state()
 
-            if self.fedsvrpg_local_update_mode == "ppo_update":
-                # Default practical PPO backend.
-                # First, optionally compute the FedSVRPG-M correction at the
-                # pre-PPO local actor.  For beta=1 this branch is skipped, so
-                # the client update is exactly the local SB3 PPO update.
-                if self.momentum_beta < 1.0:
+                if self.fedsvrpg_local_update_mode == "ppo_update":
+                    # Default practical PPO backend.
+                    # First, optionally compute the FedSVRPG-M correction at the
+                    # pre-PPO local actor.  For beta=1 this branch is skipped, so
+                    # the client update is exactly the local SB3 PPO update.
+                    if self.momentum_beta < 1.0:
+                        current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
+                            current_actor,
+                            previous_global_actor,
+                        )
+                        correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
+                        svrp_anchor = self._add_actor_deltas(server_direction, correction)
+                        svrp_delta = self._scale_actor_delta(svrp_anchor, self.local_lr)
+                        svrp_delta = self._clip_actor_delta(svrp_delta)
+                    else:
+                        current_delta = self._zero_like_actor_state()
+                        correction = self._zero_like_actor_state()
+                        svrp_delta = self._zero_like_actor_state()
+                        is_metrics = {
+                            "frl/fedsvrpg_is_weight_mean": 1.0,
+                            "frl/fedsvrpg_is_weight_max": 1.0,
+                        }
+
+                    # Run the actual local PPO optimizer update.  This updates both
+                    # actor and critic exactly as SB3 PPO would for this rollout.
+                    ppo_delta = self._run_local_ppo_update()
+
+                    if self.momentum_beta < 1.0:
+                        # Replace the PPO actor displacement by the beta-blended
+                        # practical FedSVRPG-M displacement.  The critic update made
+                        # by PPO is kept local.
+                        blended_delta = self._add_actor_deltas(
+                            self._scale_actor_delta(ppo_delta, self.momentum_beta),
+                            self._scale_actor_delta(svrp_delta, 1.0 - self.momentum_beta),
+                        )
+                        updated_actor = self._add_static_modules(current_actor, blended_delta)
+                        self._set_actor_state(updated_actor)
+                        self._reset_actor_optimizer_state()
+                        effective_delta = blended_delta
+                    else:
+                        # beta=1: this is the local PPO update displacement.
+                        # The server will still divide the uploaded round delta by
+                        # local_lr * K and then multiply by lambda
+                        # (server_update_weight).  Setting lambda = local_lr * K
+                        # makes the shared actor update equal to actor-only PPOAvg
+                        # parameter averaging.
+                        effective_delta = ppo_delta
+
+                    update_norms.append(self._actor_delta_norm(effective_delta))
+                    ppo_delta_norms.append(self._actor_delta_norm(ppo_delta))
+                    current_delta_norms.append(self._actor_delta_norm(current_delta))
+                    correction_norms.append(self._actor_delta_norm(correction))
+                    is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
+                    is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
+
+                else:
+                    # Legacy/theory-closer gradient-level backend.  This does not
+                    # run PPO's optimizer for the actor; it applies the FedSVRPG-M
+                    # direction manually and then fits the critic locally.
                     current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
                         current_actor,
                         previous_global_actor,
                     )
+
                     correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
                     svrp_anchor = self._add_actor_deltas(server_direction, correction)
-                    svrp_delta = self._scale_actor_delta(svrp_anchor, self.local_lr)
-                    svrp_delta = self._clip_actor_delta(svrp_delta)
-                else:
-                    current_delta = self._zero_like_actor_state()
-                    correction = self._zero_like_actor_state()
-                    svrp_delta = self._zero_like_actor_state()
-                    is_metrics = {
-                        "frl/fedsvrpg_is_weight_mean": 1.0,
-                        "frl/fedsvrpg_is_weight_max": 1.0,
-                    }
-
-                # Run the actual local PPO optimizer update.  This updates both
-                # actor and critic exactly as SB3 PPO would for this rollout.
-                ppo_delta = self._run_local_ppo_update()
-
-                if self.momentum_beta < 1.0:
-                    # Replace the PPO actor displacement by the beta-blended
-                    # practical FedSVRPG-M displacement.  The critic update made
-                    # by PPO is kept local.
-                    blended_delta = self._add_actor_deltas(
-                        self._scale_actor_delta(ppo_delta, self.momentum_beta),
-                        self._scale_actor_delta(svrp_delta, 1.0 - self.momentum_beta),
+                    momentum_direction = self._add_actor_deltas(
+                        self._scale_actor_delta(current_delta, self.momentum_beta),
+                        self._scale_actor_delta(svrp_anchor, 1.0 - self.momentum_beta),
                     )
-                    updated_actor = self._add_static_modules(current_actor, blended_delta)
-                    self._set_actor_state(updated_actor)
-                    self._reset_actor_optimizer_state()
-                    effective_delta = blended_delta
-                else:
-                    # beta=1: this is the local PPO update displacement.
-                    # The server will still divide the uploaded round delta by
-                    # local_lr * K and then multiply by lambda
-                    # (server_update_weight).  Setting lambda = local_lr * K
-                    # makes the shared actor update equal to actor-only PPOAvg
-                    # parameter averaging.
-                    effective_delta = ppo_delta
+                    momentum_direction = self._clip_actor_delta(momentum_direction)
 
-                update_norms.append(self._actor_delta_norm(effective_delta))
-                ppo_delta_norms.append(self._actor_delta_norm(ppo_delta))
-                current_delta_norms.append(self._actor_delta_norm(current_delta))
-                correction_norms.append(self._actor_delta_norm(correction))
-                is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
-                is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
+                    self._apply_actor_delta(momentum_direction)
+                    self._update_local_critic()
 
-            else:
-                # Legacy/theory-closer gradient-level backend.  This does not
-                # run PPO's optimizer for the actor; it applies the FedSVRPG-M
-                # direction manually and then fits the critic locally.
-                current_delta, previous_delta, is_metrics = self._paired_ppo_actor_gradient_deltas(
-                    current_actor,
-                    previous_global_actor,
-                )
+                    update_norms.append(self._actor_delta_norm(momentum_direction))
+                    ppo_delta_norms.append(0.0)
+                    current_delta_norms.append(self._actor_delta_norm(current_delta))
+                    correction_norms.append(self._actor_delta_norm(correction))
+                    is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
+                    is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
 
-                correction = self._add_actor_deltas(current_delta, previous_delta, rhs_scale=-1.0)
-                svrp_anchor = self._add_actor_deltas(server_direction, correction)
-                momentum_direction = self._add_actor_deltas(
-                    self._scale_actor_delta(current_delta, self.momentum_beta),
-                    self._scale_actor_delta(svrp_anchor, 1.0 - self.momentum_beta),
-                )
-                momentum_direction = self._clip_actor_delta(momentum_direction)
+                local_returns.append(float(rollout_return))
+                collected_steps += self.n_steps * self.n_envs
+                num_local_updates += 1
 
-                self._apply_actor_delta(momentum_direction)
-                self._update_local_critic()
+            actor_after_round = self._get_actor_state()
+            self._fedsvrpg_last_actor_delta = self._subtract_static_modules(actor_after_round, actor_before_round)
+            self._fedsvrpg_last_return = float(np.mean(local_returns)) if local_returns else 0.0
+            self._fedsvrpg_last_num_local_updates = int(num_local_updates)
+            self._last_federated_metrics = {
+                "frl/fedsvrpg_local_updates": float(num_local_updates),
+                "frl/fedsvrpg_mean_update_norm": float(np.mean(update_norms)) if update_norms else 0.0,
+                "frl/fedsvrpg_mean_ppo_delta_norm": float(np.mean(ppo_delta_norms)) if ppo_delta_norms else 0.0,
+                "frl/fedsvrpg_mean_current_delta_norm": float(np.mean(current_delta_norms)) if current_delta_norms else 0.0,
+                "frl/fedsvrpg_mean_correction_norm": float(np.mean(correction_norms)) if correction_norms else 0.0,
+                "frl/fedsvrpg_mean_is_weight": float(np.mean(is_weight_means)) if is_weight_means else 1.0,
+                "frl/fedsvrpg_max_is_weight": float(np.max(is_weight_maxs)) if is_weight_maxs else 1.0,
+                "frl/fedsvrpg_gradient_type_ppo_clip": float(self.fedsvrpg_gradient_type == "ppo_clip"),
+                "frl/fedsvrpg_gradient_type_score": float(self.fedsvrpg_gradient_type == "score"),
+                "frl/fedsvrpg_local_update_mode_ppo": float(self.fedsvrpg_local_update_mode == "ppo_update"),
+                "frl/fedsvrpg_local_update_mode_gradient": float(self.fedsvrpg_local_update_mode == "gradient_update"),
+                "frl/fedsvrpg_actor_n_epochs": float(self.actor_n_epochs),
+                "frl/fedsvrpg_actor_batch_size": float(
+                    self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
+                    if self.actor_batch_size is None
+                    else self.actor_batch_size
+                ),
+            }
 
-                update_norms.append(self._actor_delta_norm(momentum_direction))
-                ppo_delta_norms.append(0.0)
-                current_delta_norms.append(self._actor_delta_norm(current_delta))
-                correction_norms.append(self._actor_delta_norm(correction))
-                is_weight_means.append(float(is_metrics["frl/fedsvrpg_is_weight_mean"]))
-                is_weight_maxs.append(float(is_metrics["frl/fedsvrpg_is_weight_max"]))
-
-            local_returns.append(float(rollout_return))
-            collected_steps += self.n_steps * self.n_envs
-            num_local_updates += 1
-
-        actor_after_round = self._get_actor_state()
-        self._fedsvrpg_last_actor_delta = self._subtract_static_modules(actor_after_round, actor_before_round)
-        self._fedsvrpg_last_return = float(np.mean(local_returns)) if local_returns else 0.0
-        self._fedsvrpg_last_num_local_updates = int(num_local_updates)
-        self._last_federated_metrics = {
-            "frl/fedsvrpg_local_updates": float(num_local_updates),
-            "frl/fedsvrpg_mean_update_norm": float(np.mean(update_norms)) if update_norms else 0.0,
-            "frl/fedsvrpg_mean_ppo_delta_norm": float(np.mean(ppo_delta_norms)) if ppo_delta_norms else 0.0,
-            "frl/fedsvrpg_mean_current_delta_norm": float(np.mean(current_delta_norms)) if current_delta_norms else 0.0,
-            "frl/fedsvrpg_mean_correction_norm": float(np.mean(correction_norms)) if correction_norms else 0.0,
-            "frl/fedsvrpg_mean_is_weight": float(np.mean(is_weight_means)) if is_weight_means else 1.0,
-            "frl/fedsvrpg_max_is_weight": float(np.max(is_weight_maxs)) if is_weight_maxs else 1.0,
-            "frl/fedsvrpg_gradient_type_ppo_clip": float(self.fedsvrpg_gradient_type == "ppo_clip"),
-            "frl/fedsvrpg_gradient_type_score": float(self.fedsvrpg_gradient_type == "score"),
-            "frl/fedsvrpg_local_update_mode_ppo": float(self.fedsvrpg_local_update_mode == "ppo_update"),
-            "frl/fedsvrpg_local_update_mode_gradient": float(self.fedsvrpg_local_update_mode == "gradient_update"),
-            "frl/fedsvrpg_actor_n_epochs": float(self.actor_n_epochs),
-            "frl/fedsvrpg_actor_batch_size": float(
-                self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
-                if self.actor_batch_size is None
-                else self.actor_batch_size
-            ),
-        }
+        finally:
+            self._federated_progress_lock = None
 
     def get_upload_payload(self) -> FederatedPayload:
         return {
