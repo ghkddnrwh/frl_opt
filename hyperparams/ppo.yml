@@ -427,7 +427,7 @@ Hopper-v4:
   n_timesteps: !!float 1e6
   batch_size: 32
   n_steps: 512
-  gamma: 0.99
+  gamma: 0.999
   learning_rate: 9.80828e-05
   ent_coef: 0.00229519
   clip_range: 0.2

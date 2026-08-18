@@ -905,7 +905,7 @@ def generate_learning_plots(
 
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbAnt-v4"
+    env_id = "PerturbWalker2d-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
     num_trials = 5
 
@@ -921,7 +921,7 @@ def main():
     plot_eval_round_freq = 40
 
     # perturbation_types = ["none", "gravity", "mass", "length"]
-    perturbation_types = ["gravity", "friction"]
+    perturbation_types = ["friction", "gravity"]
 
     for perturbation_type in perturbation_types:
         # 여러 알고리즘의 경로를 리스트로 정의
@@ -953,23 +953,38 @@ def main():
             # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),
 
 
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/ppo_avg"),
+            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/ppo_avg"),
 
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
             
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0003"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
+            
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0002"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0005"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.001"),
+            
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.00001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.000001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0000001"),
 
+
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0001"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0003"),
 
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco/noise_assignment/{env_id}/{perturbation_type}"
+        plot_root_path = f"plots/frl_eh/tuning_mujoco/fixed/noise_assignment/{env_id}/{perturbation_type}"
 
         # 추가 하위 폴더 인자 묶음
         #
