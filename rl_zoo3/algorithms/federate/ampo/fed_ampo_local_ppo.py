@@ -49,25 +49,28 @@ def project_to_simplex(values: np.ndarray) -> np.ndarray:
 
 
 class _RawRewardCaptureCallback(BaseCallback):
-    """Record rollout rewards before VecNormalize reward scaling changes J_k."""
+    """Capture raw/normalized training rewards and episode completions for the dual estimator."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.rewards: list[np.ndarray] = []
-        self.episode_starts: list[np.ndarray] = []
+        self.raw_rewards: list[np.ndarray] = []
+        self.normalized_rewards: list[np.ndarray] = []
+        self.dones: list[np.ndarray] = []
 
     def _on_step(self) -> bool:
-        rewards = np.asarray(self.locals["rewards"], dtype=np.float64)
+        normalized_rewards = np.asarray(self.locals["rewards"], dtype=np.float64)
+        raw_rewards = normalized_rewards
         vecnormalize = self.model.get_vec_normalize_env()
         if vecnormalize is not None and getattr(vecnormalize, "norm_reward", False):
-            rewards = np.asarray(vecnormalize.get_original_reward(), dtype=np.float64)
+            raw_rewards = np.asarray(vecnormalize.get_original_reward(), dtype=np.float64)
 
-        episode_starts = getattr(self.model, "_last_episode_starts", None)
-        if episode_starts is None:
-            episode_starts = np.zeros_like(rewards, dtype=bool)
+        dones = self.locals.get("dones")
+        if dones is None:
+            dones = np.zeros_like(normalized_rewards, dtype=bool)
 
-        self.rewards.append(rewards.copy())
-        self.episode_starts.append(np.asarray(episode_starts, dtype=bool).copy())
+        self.raw_rewards.append(raw_rewards.copy())
+        self.normalized_rewards.append(normalized_rewards.copy())
+        self.dones.append(np.asarray(dones, dtype=bool).copy())
         return True
 
 
@@ -77,14 +80,16 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     Paper-level round:
       1. the server broadcasts the shared actor theta,
       2. each client collects exactly one rollout with that global actor,
-      3. the rollout return is stored as J_k(theta),
+      3. completed training-stream episode returns update the client dual-return EMA,
       4. each client performs local PPO actor/critic updates on that rollout,
-      5. each client uploads the actor delta and J_k(theta),
+      5. each client uploads the actor delta and current dual-return EMA,
       6. the server applies theta <- theta + rho * sum_k lambda_k Delta_k,
       7. the server applies lambda <- Proj_Delta(lambda - eta_lambda * J).
 
-    To keep every dual return tied to the same pre-update global actor,
-    ``local_steps`` must equal ``n_steps * n_envs`` exactly.
+    ``local_steps`` must equal ``n_steps * n_envs`` exactly so the local PPO
+    update is based on one pre-update global-policy rollout per round. The
+    dual estimator is a training-stream episodic estimator whose partial
+    episodes may span communication rounds.
 
     ``dual_update_mode="uniform"`` freezes lambda to 1/K for the ablation.
     ``critic_sync_mode="local"`` is the paper default; ``"fedavg"`` and
@@ -109,6 +114,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     valid_critic_sync_modes: tuple[str, ...] = ("local", "fedavg", "actor_like")
     valid_vecnormalize_sync_modes: tuple[str, ...] = ("none", "obs", "reward", "obs_reward")
     valid_dual_return_sources: tuple[str, ...] = ("raw", "normalized")
+    valid_dual_return_modes: tuple[str, ...] = ("discounted", "undiscounted")
+    valid_dual_scale_modes: tuple[str, ...] = ("none", "std_ema")
     valid_local_actor_update_modes: tuple[str, ...] = ("standard", "momentum")
 
     federated_manager_keys: tuple[str, ...] = (
@@ -133,6 +140,13 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         "server_actor_optimizer",
         "vecnormalize_sync_mode",
         "dual_return_source",
+        "dual_return_mode",
+        "dual_return_ema_beta",
+        "dual_update_interval",
+        "dual_warmup_min_episodes",
+        "dual_scale_mode",
+        "dual_scale_ema_beta",
+        "dual_scale_epsilon",
         "local_actor_update_mode",
         "actor_update_mode",
         "momentum_beta",
@@ -170,6 +184,26 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             kwargs.pop("vecnormalize_sync_mode", "obs_reward")
         )
         self.dual_return_source = self._normalize_dual_return_source(kwargs.pop("dual_return_source", "raw"))
+        self.dual_return_mode = self._normalize_dual_return_mode(kwargs.pop("dual_return_mode", "discounted"))
+        self.dual_return_ema_beta = float(kwargs.pop("dual_return_ema_beta", 0.9))
+        if not (0.0 <= self.dual_return_ema_beta < 1.0):
+            raise ValueError("dual_return_ema_beta must be in [0, 1).")
+
+        self.dual_update_interval = int(kwargs.pop("dual_update_interval", 5))
+        if self.dual_update_interval <= 0:
+            raise ValueError("dual_update_interval must be positive.")
+
+        self.dual_warmup_min_episodes = int(kwargs.pop("dual_warmup_min_episodes", 1))
+        if self.dual_warmup_min_episodes <= 0:
+            raise ValueError("dual_warmup_min_episodes must be positive.")
+
+        self.dual_scale_mode = self._normalize_dual_scale_mode(kwargs.pop("dual_scale_mode", "std_ema"))
+        self.dual_scale_ema_beta = float(kwargs.pop("dual_scale_ema_beta", 0.95))
+        if not (0.0 <= self.dual_scale_ema_beta < 1.0):
+            raise ValueError("dual_scale_ema_beta must be in [0, 1).")
+        self.dual_scale_epsilon = float(kwargs.pop("dual_scale_epsilon", 1e-8))
+        if self.dual_scale_epsilon <= 0.0:
+            raise ValueError("dual_scale_epsilon must be positive.")
 
         actor_update_alias = kwargs.pop("actor_update_mode", None)
         raw_actor_update_mode = kwargs.pop("local_actor_update_mode", actor_update_alias)
@@ -190,6 +224,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if raw_dual_mode is None:
             raw_dual_mode = "uniform" if fixed_uniform else "adaptive"
         self.dual_update_mode = self._normalize_dual_update_mode(raw_dual_mode)
+        self._federated_progress_lock: float | None = None
 
         for key in self.federated_manager_keys:
             kwargs.pop(key, None)
@@ -202,13 +237,25 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_critic_state: FederatedModules | None = None
         self._ampo_last_critic_delta: FederatedModules | None = None
         self._ampo_last_num_actor_batches: int = 0
-        self._ampo_last_raw_rewards: np.ndarray | None = None
-        self._ampo_last_raw_episode_starts: np.ndarray | None = None
         self._ampo_last_current_actor_grad_norm: float = 0.0
         self._ampo_last_reference_actor_grad_norm: float = 0.0
         self._ampo_last_gradient_difference_norm: float = 0.0
         self._ampo_last_corrected_actor_grad_norm: float = 0.0
         self._ampo_actor_momentum_state: dict[str, th.Tensor] | None = None
+
+        # Training-stream episodic dual estimator. Partial episodes survive
+        # communication rounds and are finalized only on actual environment done.
+        self._ampo_dual_episode_returns: np.ndarray | None = None
+        self._ampo_dual_episode_discounts: np.ndarray | None = None
+        self._ampo_dual_return_ema: float | None = None
+        self._ampo_dual_completed_episodes: int = 0
+        self._ampo_last_completed_episode_mean: float | None = None
+        self._ampo_last_completed_episodes: int = 0
+
+        # Server-side slow-timescale/scaling state.
+        self._ampo_server_round: int = 0
+        self._ampo_dual_scale_ema: float | None = None
+
         self._last_federated_metrics: dict[str, float] = {}
 
     @classmethod
@@ -218,6 +265,21 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     @classmethod
     def uses_federated_client_n_envs(cls) -> bool:
         return True
+
+    def prepare_federated_training(self, clients: Sequence[FederatedAlgorithmMixin]) -> None:
+        del clients
+        if self.vecnormalize_sync_mode == "none":
+            type(self)._last_global_vecnormalize_state = None
+            return
+        type(self)._last_global_vecnormalize_state = type(self)._clone_state(
+            self._get_filtered_vecnormalize_state()
+        )
+
+    def _update_current_progress_remaining(self, num_timesteps: int, total_timesteps: int) -> None:
+        if self._federated_progress_lock is None:
+            super()._update_current_progress_remaining(num_timesteps, total_timesteps)
+            return
+        self._current_progress_remaining = self._federated_progress_lock
 
     @staticmethod
     def _as_bool(value: Any) -> bool:
@@ -374,6 +436,45 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if normalized not in cls.valid_dual_return_sources:
             raise ValueError(
                 f"Unsupported dual_return_source={source!r}. Choose one of {cls.valid_dual_return_sources}."
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_dual_return_mode(cls, mode: str) -> str:
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "discount": "discounted",
+            "disc": "discounted",
+            "gamma": "discounted",
+            "episodic": "undiscounted",
+            "episode": "undiscounted",
+            "raw_episode": "undiscounted",
+            "sum": "undiscounted",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_dual_return_modes:
+            raise ValueError(
+                f"Unsupported dual_return_mode={mode!r}. Choose one of {cls.valid_dual_return_modes}."
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_dual_scale_mode(cls, mode: str) -> str:
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "off": "none",
+            "false": "none",
+            "raw": "none",
+            "std": "std_ema",
+            "standardize": "std_ema",
+            "standardized": "std_ema",
+            "zscore": "std_ema",
+            "z_score": "std_ema",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_dual_scale_modes:
+            raise ValueError(
+                f"Unsupported dual_scale_mode={mode!r}. Choose one of {cls.valid_dual_scale_modes}."
             )
         return normalized
 
@@ -658,6 +759,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             assert self.env is not None
             self._last_obs = self.env.reset()
             self._last_episode_starts = np.ones((self.env.num_envs,), dtype=bool)
+            self._reset_dual_episode_accumulators()
 
         if self.rollout_buffer is None:
             self.rollout_buffer = RolloutBuffer(
@@ -670,7 +772,75 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 n_envs=self.n_envs,
             )
 
-    def _collect_one_rollout(self) -> float:
+    def _ensure_dual_episode_accumulators(self) -> None:
+        n_envs = int(self.n_envs)
+        if self._ampo_dual_episode_returns is None or self._ampo_dual_episode_returns.shape != (n_envs,):
+            self._ampo_dual_episode_returns = np.zeros(n_envs, dtype=np.float64)
+            self._ampo_dual_episode_discounts = np.ones(n_envs, dtype=np.float64)
+
+    def _reset_dual_episode_accumulators(self) -> None:
+        if self._ampo_dual_episode_returns is not None:
+            self._ampo_dual_episode_returns.fill(0.0)
+        if self._ampo_dual_episode_discounts is not None:
+            self._ampo_dual_episode_discounts.fill(1.0)
+
+    def _consume_dual_training_steps(
+        self,
+        rewards: np.ndarray,
+        dones: np.ndarray,
+    ) -> list[float]:
+        rewards = np.asarray(rewards, dtype=np.float64)
+        dones = np.asarray(dones, dtype=bool)
+        if rewards.ndim == 1:
+            rewards = rewards[:, None]
+        if dones.ndim == 1:
+            dones = dones[:, None]
+        if rewards.shape != dones.shape:
+            raise ValueError(f"dual reward/done shape mismatch: {rewards.shape} vs {dones.shape}.")
+
+        self._ensure_dual_episode_accumulators()
+        assert self._ampo_dual_episode_returns is not None
+        assert self._ampo_dual_episode_discounts is not None
+        if rewards.shape[1] != self._ampo_dual_episode_returns.shape[0]:
+            raise ValueError(
+                f"Expected {self._ampo_dual_episode_returns.shape[0]} env reward streams, got {rewards.shape[1]}."
+            )
+
+        completed: list[float] = []
+        for step_idx in range(rewards.shape[0]):
+            for env_idx in range(rewards.shape[1]):
+                reward = float(rewards[step_idx, env_idx])
+                if self.dual_return_mode == "discounted":
+                    self._ampo_dual_episode_returns[env_idx] += (
+                        self._ampo_dual_episode_discounts[env_idx] * reward
+                    )
+                    self._ampo_dual_episode_discounts[env_idx] *= float(self.gamma)
+                else:
+                    self._ampo_dual_episode_returns[env_idx] += reward
+
+                if bool(dones[step_idx, env_idx]):
+                    completed.append(float(self._ampo_dual_episode_returns[env_idx]))
+                    self._ampo_dual_episode_returns[env_idx] = 0.0
+                    self._ampo_dual_episode_discounts[env_idx] = 1.0
+
+        return completed
+
+    def _update_dual_return_ema(self, completed_returns: Sequence[float]) -> None:
+        self._ampo_last_completed_episodes = len(completed_returns)
+        if not completed_returns:
+            self._ampo_last_completed_episode_mean = None
+            return
+
+        episode_mean = float(np.mean(np.asarray(completed_returns, dtype=np.float64)))
+        self._ampo_last_completed_episode_mean = episode_mean
+        self._ampo_dual_completed_episodes += len(completed_returns)
+        if self._ampo_dual_return_ema is None:
+            self._ampo_dual_return_ema = episode_mean
+        else:
+            beta = self.dual_return_ema_beta
+            self._ampo_dual_return_ema = beta * self._ampo_dual_return_ema + (1.0 - beta) * episode_mean
+
+    def _collect_one_rollout(self) -> list[float]:
         self._init_ampo_training_state()
 
         reward_capture = _RawRewardCaptureCallback()
@@ -686,63 +856,21 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if not success:
             raise RuntimeError("collect_rollouts() returned False.")
 
-        self._ampo_last_raw_rewards = np.asarray(reward_capture.rewards, dtype=np.float64)
-        self._ampo_last_raw_episode_starts = np.asarray(reward_capture.episode_starts, dtype=bool)
+        if self.dual_return_source == "raw":
+            rewards = np.asarray(reward_capture.raw_rewards, dtype=np.float64)
+        else:
+            rewards = np.asarray(reward_capture.normalized_rewards, dtype=np.float64)
+        dones = np.asarray(reward_capture.dones, dtype=bool)
+        completed_returns = self._consume_dual_training_steps(rewards, dones)
 
         total_timesteps = int(getattr(self, "_total_timesteps", 0))
         if total_timesteps > 0:
             self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
-        return self._estimate_local_return()
+        return completed_returns
 
-    def _estimate_local_return(self) -> float:
-        if (
-            self.dual_return_source == "raw"
-            and self._ampo_last_raw_rewards is not None
-            and self._ampo_last_raw_episode_starts is not None
-            and self._ampo_last_raw_rewards.size > 0
-        ):
-            return self._discounted_return_from_arrays(
-                self._ampo_last_raw_rewards,
-                self._ampo_last_raw_episode_starts,
-            )
-        return self._discounted_return_from_arrays(
-            np.asarray(self.rollout_buffer.rewards.copy(), dtype=np.float64),
-            np.asarray(self.rollout_buffer.episode_starts.copy(), dtype=bool),
-        )
 
-    def _discounted_return_from_arrays(self, rewards: np.ndarray, episode_starts: np.ndarray) -> float:
-        rewards = np.asarray(rewards, dtype=np.float64)
-        episode_starts = np.asarray(episode_starts, dtype=bool)
-        if rewards.ndim == 1:
-            rewards = rewards[:, None]
-        if episode_starts.ndim == 1:
-            episode_starts = episode_starts[:, None]
 
-        returns: list[float] = []
-        partial_returns: list[float] = []
-        n_steps, n_envs = rewards.shape
-        for env_idx in range(n_envs):
-            running_return = 0.0
-            discount = 1.0
-            has_steps = False
-            for step_idx in range(n_steps):
-                if bool(episode_starts[step_idx, env_idx]) and has_steps:
-                    returns.append(running_return)
-                    running_return = 0.0
-                    discount = 1.0
-                    has_steps = False
-                running_return += discount * float(rewards[step_idx, env_idx])
-                discount *= float(self.gamma)
-                has_steps = True
-            if has_steps:
-                partial_returns.append(running_return)
-
-        if returns:
-            return float(np.mean(returns))
-        if partial_returns:
-            return float(np.mean(partial_returns))
-        return 0.0
 
     def _iter_rollout_minibatches(self) -> Sequence[RolloutBufferSamples]:
         total_size = self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
@@ -1107,38 +1235,43 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if target_steps != expected_steps:
             raise ValueError(
                 "Fed-AMPO-LocalPPO requires exactly one global-policy rollout per "
-                "communication round so that every J_k is evaluated at the same "
-                "pre-update actor. Set local_steps == n_steps * n_envs. "
+                "communication round. Set local_steps == n_steps * n_envs. "
                 f"Received local_steps={target_steps}, n_steps={self.n_steps}, "
                 f"n_envs={self.n_envs}, expected={expected_steps}."
             )
 
-        actor_before = self._get_actor_state()
-        critic_before = self._get_critic_state() if self.critic_sync_mode == "actor_like" else None
+        self._federated_progress_lock = float(self._current_progress_remaining)
+        try:
+            actor_before = self._get_actor_state()
+            critic_before = self._get_critic_state() if self.critic_sync_mode == "actor_like" else None
 
-        # J_k is computed from this rollout before any local actor update.
-        rollout_return = self._collect_one_rollout()
+            completed_episode_returns = self._collect_one_rollout()
 
-        # The same rollout is then reused for actual local PPO actor/critic updates.
-        self._update_local_actor_and_critic(actor_before)
+            # Preserve the local-PPO variant: update actor/critic locally on the same rollout.
+            self._update_local_actor_and_critic(actor_before)
 
-        actor_after = self._get_actor_state()
-        self._ampo_last_actor_delta = self._subtract_modules(actor_after, actor_before)
-        self._ampo_last_return = float(rollout_return)
-
-        if self.critic_sync_mode == "fedavg":
-            self._ampo_last_critic_state = self._get_critic_state()
-            self._ampo_last_critic_delta = None
-        elif self.critic_sync_mode == "actor_like":
-            assert critic_before is not None
-            self._ampo_last_critic_state = None
-            self._ampo_last_critic_delta = self._subtract_modules(
-                self._get_critic_state(),
-                critic_before,
+            actor_after = self._get_actor_state()
+            self._ampo_last_actor_delta = self._subtract_modules(actor_after, actor_before)
+            self._update_dual_return_ema(completed_episode_returns)
+            self._ampo_last_return = (
+                float(self._ampo_dual_return_ema) if self._ampo_dual_return_ema is not None else 0.0
             )
-        else:
-            self._ampo_last_critic_state = None
-            self._ampo_last_critic_delta = None
+
+            if self.critic_sync_mode == "fedavg":
+                self._ampo_last_critic_state = self._get_critic_state()
+                self._ampo_last_critic_delta = None
+            elif self.critic_sync_mode == "actor_like":
+                assert critic_before is not None
+                self._ampo_last_critic_state = None
+                self._ampo_last_critic_delta = self._subtract_modules(
+                    self._get_critic_state(),
+                    critic_before,
+                )
+            else:
+                self._ampo_last_critic_state = None
+                self._ampo_last_critic_delta = None
+        finally:
+            self._federated_progress_lock = None
 
     def get_upload_payload(self) -> FederatedPayload:
         if self._ampo_last_actor_delta is None:
@@ -1156,6 +1289,17 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_update_mode": self.dual_update_mode,
             "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
             "dual_return_source": self.dual_return_source,
+            "dual_return_mode": self.dual_return_mode,
+            "dual_return_ema_beta": self.dual_return_ema_beta,
+            "dual_update_interval": self.dual_update_interval,
+            "dual_warmup_min_episodes": self.dual_warmup_min_episodes,
+            "dual_scale_mode": self.dual_scale_mode,
+            "dual_scale_ema_beta": self.dual_scale_ema_beta,
+            "dual_scale_epsilon": self.dual_scale_epsilon,
+            "dual_return_ready": self._ampo_dual_return_ema is not None,
+            "dual_completed_episodes": int(self._ampo_dual_completed_episodes),
+            "dual_completed_episodes_last_update": int(self._ampo_last_completed_episodes),
+            "dual_completed_episode_mean": self._ampo_last_completed_episode_mean,
             "local_actor_update_mode": self.local_actor_update_mode,
             "momentum_beta": float(self.momentum_beta),
             "current_actor_grad_norm": float(self._ampo_last_current_actor_grad_norm),
@@ -1175,6 +1319,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             payload["critic_delta"] = self._clone_modules(self._ampo_last_critic_delta)
         return payload
 
+    @classmethod
     @classmethod
     def aggregate_uploads(
         cls,
@@ -1209,6 +1354,18 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if len(return_sources) != 1:
             raise ValueError(f"Mixed dual_return_source values are not supported: {return_sources}.")
 
+        return_modes = {
+            cls._normalize_dual_return_mode(str(upload.get("dual_return_mode", "discounted"))) for upload in uploads
+        }
+        if len(return_modes) != 1:
+            raise ValueError(f"Mixed dual_return_mode values are not supported: {return_modes}.")
+
+        scale_modes = {
+            cls._normalize_dual_scale_mode(str(upload.get("dual_scale_mode", "std_ema"))) for upload in uploads
+        }
+        if len(scale_modes) != 1:
+            raise ValueError(f"Mixed dual_scale_mode values are not supported: {scale_modes}.")
+
         actor_update_modes = {
             cls._normalize_local_actor_update_mode(str(upload.get("local_actor_update_mode", "standard")))
             for upload in uploads
@@ -1224,6 +1381,18 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if not np.allclose(momentum_betas, momentum_betas[0]):
             raise ValueError(f"Mixed momentum_beta values are not supported: {momentum_betas.tolist()}.")
 
+        def _shared_value(key: str, default: Any) -> Any:
+            values = {upload.get(key, default) for upload in uploads}
+            if len(values) != 1:
+                raise ValueError(f"Mixed {key} values are not supported: {values}.")
+            return next(iter(values))
+
+        dual_return_ema_beta = float(_shared_value("dual_return_ema_beta", 0.9))
+        dual_update_interval = int(_shared_value("dual_update_interval", 5))
+        dual_warmup_min_episodes = int(_shared_value("dual_warmup_min_episodes", 1))
+        dual_scale_ema_beta = float(_shared_value("dual_scale_ema_beta", 0.95))
+        dual_scale_epsilon = float(_shared_value("dual_scale_epsilon", 1e-8))
+
         payload: FederatedPayload = {
             "client_actor_deltas": [upload["actor_delta"] for upload in uploads],
             "client_returns": np.asarray([float(upload["return"]) for upload in uploads], dtype=np.float64),
@@ -1235,6 +1404,30 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_update_mode": dual_update_mode,
             "vecnormalize_sync_mode": vecnormalize_sync_mode,
             "dual_return_source": next(iter(return_sources)),
+            "dual_return_mode": next(iter(return_modes)),
+            "dual_return_ema_beta": dual_return_ema_beta,
+            "dual_update_interval": dual_update_interval,
+            "dual_warmup_min_episodes": dual_warmup_min_episodes,
+            "dual_scale_mode": next(iter(scale_modes)),
+            "dual_scale_ema_beta": dual_scale_ema_beta,
+            "dual_scale_epsilon": dual_scale_epsilon,
+            "client_dual_return_ready": np.asarray(
+                [bool(upload.get("dual_return_ready", False)) for upload in uploads], dtype=bool
+            ),
+            "client_completed_episodes": np.asarray(
+                [int(upload.get("dual_completed_episodes", 0)) for upload in uploads], dtype=np.int64
+            ),
+            "client_completed_episodes_last_update": np.asarray(
+                [int(upload.get("dual_completed_episodes_last_update", 0)) for upload in uploads], dtype=np.int64
+            ),
+            "client_completed_episode_means": np.asarray(
+                [
+                    np.nan if upload.get("dual_completed_episode_mean") is None
+                    else float(upload["dual_completed_episode_mean"])
+                    for upload in uploads
+                ],
+                dtype=np.float64,
+            ),
             "local_actor_update_mode": local_actor_update_mode,
             "momentum_beta": float(momentum_betas[0]),
             "client_current_actor_grad_norms": np.asarray(
@@ -1299,6 +1492,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         payload_vecnormalize_mode = self._normalize_vecnormalize_sync_mode(
             str(payload.get("vecnormalize_sync_mode", "obs_reward"))
         )
+        payload_return_mode = self._normalize_dual_return_mode(
+            str(payload.get("dual_return_mode", "discounted"))
+        )
+        payload_scale_mode = self._normalize_dual_scale_mode(
+            str(payload.get("dual_scale_mode", "std_ema"))
+        )
         payload_actor_update_mode = self._normalize_local_actor_update_mode(
             str(payload.get("local_actor_update_mode", "standard"))
         )
@@ -1314,6 +1513,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(
                 f"Server vecnormalize_sync_mode={self.vecnormalize_sync_mode!r} does not match "
                 f"payload {payload_vecnormalize_mode!r}."
+            )
+        if payload_return_mode != self.dual_return_mode:
+            raise ValueError(
+                f"Server dual_return_mode={self.dual_return_mode!r} does not match payload {payload_return_mode!r}."
+            )
+        if payload_scale_mode != self.dual_scale_mode:
+            raise ValueError(
+                f"Server dual_scale_mode={self.dual_scale_mode!r} does not match payload {payload_scale_mode!r}."
             )
         if payload_actor_update_mode != self.local_actor_update_mode:
             raise ValueError(
@@ -1372,10 +1579,75 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 critic_updated = self._mix_modules(current_critic, critic_updated, mix_weight)
             self._set_critic_state(critic_updated)
 
+        self._ampo_server_round += 1
+        client_return_ready = np.asarray(
+            payload.get("client_dual_return_ready", np.isfinite(client_returns)), dtype=bool
+        )
+        client_completed_episodes = np.asarray(
+            payload.get("client_completed_episodes", np.zeros(num_clients, dtype=np.int64)), dtype=np.int64
+        )
+        client_completed_episodes_last_update = np.asarray(
+            payload.get("client_completed_episodes_last_update", np.zeros(num_clients, dtype=np.int64)), dtype=np.int64
+        )
+        if client_return_ready.shape != (num_clients,):
+            raise ValueError(
+                f"client_dual_return_ready shape mismatch: expected {(num_clients,)}, got {client_return_ready.shape}."
+            )
+        if client_completed_episodes.shape != (num_clients,):
+            raise ValueError(
+                f"client_completed_episodes shape mismatch: expected {(num_clients,)}, got {client_completed_episodes.shape}."
+            )
+        if client_completed_episodes_last_update.shape != (num_clients,):
+            raise ValueError(
+                "client_completed_episodes_last_update shape mismatch: "
+                f"expected {(num_clients,)}, got {client_completed_episodes_last_update.shape}."
+            )
+
+        warmup_ready = bool(
+            np.all(client_return_ready)
+            and np.all(client_completed_episodes >= self.dual_warmup_min_episodes)
+            and np.all(np.isfinite(client_returns))
+        )
+        dual_update_due = (self._ampo_server_round % self.dual_update_interval) == 0
+        dual_update_applied = False
+        dual_update_skipped_small_scale = False
+        dual_signal = client_returns.copy()
+        current_return_spread = float(np.std(client_returns)) if warmup_ready else float("nan")
+
+        any_new_dual_episode = bool(np.any(client_completed_episodes_last_update > 0))
+        if self.dual_scale_mode == "std_ema" and warmup_ready and any_new_dual_episode:
+            if (
+                self._ampo_dual_scale_ema is None
+                or not np.isfinite(self._ampo_dual_scale_ema)
+                or self._ampo_dual_scale_ema <= self.dual_scale_epsilon
+            ):
+                self._ampo_dual_scale_ema = current_return_spread
+            else:
+                beta = self.dual_scale_ema_beta
+                self._ampo_dual_scale_ema = (
+                    beta * self._ampo_dual_scale_ema + (1.0 - beta) * current_return_spread
+                )
+
         if self.dual_update_mode == "uniform":
             self.lambda_weights = self._uniform_lambda(num_clients)
-        else:
-            self.lambda_weights = project_to_simplex(self.lambda_weights - self.dual_lr * client_returns)
+        elif not warmup_ready:
+            self.lambda_weights = self._uniform_lambda(num_clients)
+        elif dual_update_due:
+            if self.dual_scale_mode == "std_ema":
+                scale = 0.0 if self._ampo_dual_scale_ema is None else float(self._ampo_dual_scale_ema)
+                if not np.isfinite(scale) or scale <= self.dual_scale_epsilon:
+                    dual_update_skipped_small_scale = True
+                else:
+                    dual_signal = (client_returns - float(np.mean(client_returns))) / scale
+                    self.lambda_weights = project_to_simplex(
+                        self.lambda_weights - self.dual_lr * dual_signal
+                    )
+                    dual_update_applied = True
+            else:
+                self.lambda_weights = project_to_simplex(
+                    self.lambda_weights - self.dual_lr * client_returns
+                )
+                dual_update_applied = True
 
         lambda_after = self.lambda_weights.copy()
         client_delta_norms = [self._module_l2_norm(client_delta) for client_delta in client_actor_deltas]
@@ -1401,6 +1673,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             client_corrected_actor_grad_norms=np.asarray(
                 payload.get("client_corrected_actor_grad_norms", []), dtype=np.float64
             ),
+            client_completed_episodes=client_completed_episodes,
+            client_completed_episodes_last_update=client_completed_episodes_last_update,
+            warmup_ready=warmup_ready,
+            dual_update_due=dual_update_due,
+            dual_update_applied=dual_update_applied,
+            dual_update_skipped_small_scale=dual_update_skipped_small_scale,
+            dual_signal=dual_signal,
+            current_return_spread=current_return_spread,
         )
         self._apply_vecnormalize_from_payload(payload)
 
@@ -1438,6 +1718,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         client_reference_actor_grad_norms: np.ndarray,
         client_gradient_difference_norms: np.ndarray,
         client_corrected_actor_grad_norms: np.ndarray,
+        client_completed_episodes: np.ndarray,
+        client_completed_episodes_last_update: np.ndarray,
+        warmup_ready: bool,
+        dual_update_due: bool,
+        dual_update_applied: bool,
+        dual_update_skipped_small_scale: bool,
+        dual_signal: np.ndarray,
+        current_return_spread: float,
     ) -> None:
         metrics: dict[str, float] = {
             "server/num_clients": float(num_clients),
@@ -1453,6 +1741,23 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "server/ampo/actor_step_norm": float(actor_step_norm),
             "server/ampo/server_actor_delta_scale": float(actor_delta_scale),
             "server/ampo/dual_lr": float(self.dual_lr),
+            "server/ampo/dual_round": float(self._ampo_server_round),
+            "server/ampo/dual_update_interval": float(self.dual_update_interval),
+            "server/ampo/dual_warmup_ready": float(warmup_ready),
+            "server/ampo/dual_update_due": float(dual_update_due),
+            "server/ampo/dual_update_applied": float(dual_update_applied),
+            "server/ampo/dual_update_skipped_small_scale": float(dual_update_skipped_small_scale),
+            "server/ampo/dual_return_discounted": float(self.dual_return_mode == "discounted"),
+            "server/ampo/dual_return_undiscounted": float(self.dual_return_mode == "undiscounted"),
+            "server/ampo/dual_return_ema_beta": float(self.dual_return_ema_beta),
+            "server/ampo/dual_scale_none": float(self.dual_scale_mode == "none"),
+            "server/ampo/dual_scale_std_ema": float(self.dual_scale_mode == "std_ema"),
+            "server/ampo/dual_scale_ema_beta": float(self.dual_scale_ema_beta),
+            "server/ampo/dual_scale_value": float(self._ampo_dual_scale_ema)
+            if self._ampo_dual_scale_ema is not None else float("nan"),
+            "server/ampo/dual_current_return_spread": float(current_return_spread),
+            "server/ampo/dual_signal_mean": float(np.mean(dual_signal)),
+            "server/ampo/dual_signal_std": float(np.std(dual_signal)),
             "server/ampo/dual_uniform": float(self.dual_update_mode == "uniform"),
             "server/ampo/critic_local": float(self.critic_sync_mode == "local"),
             "server/ampo/critic_fedavg": float(self.critic_sync_mode == "fedavg"),
@@ -1475,27 +1780,26 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if client_num_actor_batches.size > 0:
             metrics["server/ampo/actor_batches_mean"] = float(np.mean(client_num_actor_batches))
         if client_current_actor_grad_norms.size > 0:
-            metrics["server/ampo/current_actor_grad_norm_mean"] = float(
-                np.mean(client_current_actor_grad_norms)
-            )
+            metrics["server/ampo/current_actor_grad_norm_mean"] = float(np.mean(client_current_actor_grad_norms))
         if client_reference_actor_grad_norms.size > 0:
-            metrics["server/ampo/reference_actor_grad_norm_mean"] = float(
-                np.mean(client_reference_actor_grad_norms)
-            )
+            metrics["server/ampo/reference_actor_grad_norm_mean"] = float(np.mean(client_reference_actor_grad_norms))
         if client_gradient_difference_norms.size > 0:
-            metrics["server/ampo/gradient_difference_norm_mean"] = float(
-                np.mean(client_gradient_difference_norms)
-            )
+            metrics["server/ampo/gradient_difference_norm_mean"] = float(np.mean(client_gradient_difference_norms))
         if client_corrected_actor_grad_norms.size > 0:
-            metrics["server/ampo/corrected_actor_grad_norm_mean"] = float(
-                np.mean(client_corrected_actor_grad_norms)
-            )
+            metrics["server/ampo/corrected_actor_grad_norm_mean"] = float(np.mean(client_corrected_actor_grad_norms))
         for client_idx, (client_return, lambda_weight, delta_norm) in enumerate(
             zip(client_returns, lambda_after, client_delta_norms, strict=True)
         ):
             metrics[f"server/ampo/client_{client_idx}/return"] = float(client_return)
             metrics[f"server/ampo/client_{client_idx}/lambda"] = float(lambda_weight)
             metrics[f"server/ampo/client_{client_idx}/delta_norm"] = float(delta_norm)
+            metrics[f"server/ampo/client_{client_idx}/completed_episodes"] = float(
+                client_completed_episodes[client_idx]
+            )
+            metrics[f"server/ampo/client_{client_idx}/completed_episodes_last_update"] = float(
+                client_completed_episodes_last_update[client_idx]
+            )
+            metrics[f"server/ampo/client_{client_idx}/dual_signal"] = float(dual_signal[client_idx])
         self._last_federated_metrics = metrics
 
     def get_client_weight(self) -> float:
@@ -1509,6 +1813,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_update_mode": self.dual_update_mode,
             "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
             "dual_return_source": self.dual_return_source,
+            "dual_return_mode": self.dual_return_mode,
+            "dual_scale_mode": self.dual_scale_mode,
             "local_actor_update_mode": self.local_actor_update_mode,
             "momentum_beta": float(self.momentum_beta),
             "vecnormalize": self._get_filtered_vecnormalize_state(),
@@ -1583,6 +1889,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         vecnormalize = self.get_vec_normalize_env()
         if vecnormalize is None:
             return
+
+        current_original_obs = None
+        if self._last_obs is not None:
+            current_original_obs = vecnormalize.get_original_obs()
+
         for attr in ("norm_obs", "norm_reward", "clip_obs", "clip_reward", "gamma", "epsilon", "training"):
             if attr in state:
                 setattr(vecnormalize, attr, state[attr])
@@ -1590,8 +1901,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             self._set_rms_state(vecnormalize.obs_rms, state["obs_rms"])
         if state.get("ret_rms") is not None and getattr(vecnormalize, "ret_rms", None) is not None:
             self._set_rms_state(vecnormalize.ret_rms, state["ret_rms"])
-            if getattr(vecnormalize, "returns", None) is not None:
-                vecnormalize.returns = np.zeros_like(vecnormalize.returns)
+
+        if current_original_obs is not None:
+            self._last_obs = vecnormalize.normalize_obs(current_original_obs)
+            self._last_original_obs = current_original_obs
 
     def _apply_vecnormalize_from_payload(self, payload: FederatedPayload) -> None:
         payload_mode = self._normalize_vecnormalize_sync_mode(
@@ -1604,9 +1917,6 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if self.vecnormalize_sync_mode == "none":
             return
         self._set_vecnormalize_state(payload.get("vecnormalize"))
-        self._last_obs = None
-        self._last_original_obs = None
-        self._last_episode_starts = None
 
     @staticmethod
     def _clone_state(state: Any) -> Any:
