@@ -905,7 +905,7 @@ def generate_learning_plots(
 
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbWalker2d-v4"
+    env_id = "PerturbHopper-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
     num_trials = 5
 
@@ -926,33 +926,6 @@ def main():
     for perturbation_type in perturbation_types:
         # 여러 알고리즘의 경로를 리스트로 정의
         algo_config_list = [
-            # ("ppo_avg", f"logs/tuned/{env_id}/3/{perturbation_type}/128"),
-            # ("ppo_avg", f"logs/tuned/{env_id}/5/{perturbation_type}/64"),
-            # ("ppo_avg", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/ppo_avg/64/8"),
-            # ("fedsp_pg_ppo", f"logs/tuned/{env_id}/20/{perturbation_type}/64"),
-            # ("fedsp_pg_ppo_paper_aligned", f"logs/tuned/{env_id}/20/{perturbation_type}/64/0.0003"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0001"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0003"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.001"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.003"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.01"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.03"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.00001"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.0001"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.001"),
-            # ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.1"),
-
-
-
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.2/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.5/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
-            # ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),
-
-
             ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/ppo_avg"),
 
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
@@ -984,6 +957,10 @@ def main():
             ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
             ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
             ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
+
+            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.5"),
+            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.7"),
+            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/1.0"),
 
         ]
 
@@ -1066,3 +1043,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+# ("ppo_avg", f"logs/tuned/{env_id}/3/{perturbation_type}/128"),
+# ("ppo_avg", f"logs/tuned/{env_id}/5/{perturbation_type}/64"),
+# ("ppo_avg", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/ppo_avg/64/8"),
+# ("fedsp_pg_ppo", f"logs/tuned/{env_id}/20/{perturbation_type}/64"),
+# ("fedsp_pg_ppo_paper_aligned", f"logs/tuned/{env_id}/20/{perturbation_type}/64/0.0003"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0001"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0003"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.001"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.003"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.01"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.03"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.00001"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.0001"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.001"),
+# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.1"),
+
+
+
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.2/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.5/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
+# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),
