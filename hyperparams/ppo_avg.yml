@@ -186,7 +186,7 @@ PerturbHopper-v4:
   n_envs: 8
   n_steps: 64        # local_steps=2048 추천일 때
   batch_size: 256
-  learning_rate: 3e-4
+  learning_rate: !!float 3e-4
   ent_coef: 0.0
   clip_range: 0.2
   n_epochs: 10
