@@ -183,6 +183,7 @@ PerturbHopper-v4:
   local_steps: 512
   server_update_weight: 1.0
 
+  policy: MlpPolicy
   n_envs: 8
   n_steps: 64        # local_steps=2048 추천일 때
   batch_size: 256
