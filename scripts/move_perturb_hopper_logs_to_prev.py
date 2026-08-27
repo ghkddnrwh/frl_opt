@@ -64,7 +64,7 @@ def find_hopper_logs(root: Path, dest: Path) -> list[Path]:
 def main() -> None:
     args = parse_args()
     root = args.root.resolve()
-    dest = (args.dest or root / "prev2").resolve()
+    dest = (args.dest or root / "prev3").resolve()
 
     if not root.is_dir():
         raise SystemExit(f"Root directory does not exist: {root}")
