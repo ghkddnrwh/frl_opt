@@ -1,17 +1,17 @@
-# export_wandb_runs_2026_08_29_hardcoded.py
+# export_wandb_runs_2026_08_29_evening_hardcoded.py
 #
-# 2026-08-29에 제공된 4개 W&B CSV의 run ID를 직접 하드코딩한 exporter.
-# 실행 시 CSV 파일은 필요하지 않습니다.
+# Generated from 4 W&B CSV exports uploaded on 2026-08-29 evening.
+# CSV files are NOT required when running this script; all run IDs are hardcoded.
 #
-# CSV rows (중복 포함): 60
-# Unique run IDs: 60
+# CSV rows / IDs including duplicates: 50
+# Unique run IDs: 50
 # Duplicate occurrences: 0
-# CSV state counts: {'finished': 60}
+# CSV state counts: {'finished': 50}
 #
 # Usage:
 #   pip install wandb
 #   wandb login
-#   python export_wandb_runs_2026_08_29_hardcoded.py
+#   python export_wandb_runs_2026_08_29_evening_hardcoded.py
 
 import json
 import math
@@ -20,112 +20,108 @@ from pathlib import Path
 
 import wandb
 
+
 ENTITY = "ukjo19"
 PROJECT = "sb3"
-OUT_ROOT = "logs/wandb_logs_2026_08_29"
+OUT_ROOT = "logs/wandb_logs_2026_08_29_evening"
 PAGE_SIZE = 500
 
-# True면 API 조회 시점에 finished인 run만 export
-# False면 CSV에 포함된 모든 run의 현재까지 로그를 export
+# True: export only runs whose current W&B API state is "finished".
+# False: export every hardcoded run using whatever history currently exists.
 ONLY_FINISHED = False
 
-SOURCE_FILE_METADATA = {'wandb_export_2026-08-29T00_47_32.419+09_00.csv': {'group': 'walker2d_friction', 'env': 'PerturbWalker2d-v4', 'perturbation': 'friction', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_01.097+09_00.csv': {'group': 'walker2d_gravity', 'env': 'PerturbWalker2d-v4', 'perturbation': 'gravity', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_12.661+09_00.csv': {'group': 'ant_gravity', 'env': 'PerturbAnt-v4', 'perturbation': 'gravity', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_39.776+09_00.csv': {'group': 'ant_friction', 'env': 'PerturbAnt-v4', 'perturbation': 'friction', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}}
+
+SOURCE_FILE_METADATA = {'wandb_export_2026-08-29T20_42_30.557+09_00.csv': {'group': 'perturbhopper_v4_friction', 'env': 'PerturbHopper-v4', 'perturbation': 'friction', 'rows': 20, 'run_ids': 20, 'state_counts': {'finished': 20}}, 'wandb_export_2026-08-29T20_42_51.356+09_00.csv': {'group': 'perturbhopper_v4_gravity', 'env': 'PerturbHopper-v4', 'perturbation': 'gravity', 'rows': 20, 'run_ids': 20, 'state_counts': {'finished': 20}}, 'wandb_export_2026-08-29T20_43_07.719+09_00.csv': {'group': 'perturbhopper_v4_gravity', 'env': 'PerturbHopper-v4', 'perturbation': 'gravity', 'rows': 5, 'run_ids': 5, 'state_counts': {'finished': 5}}, 'wandb_export_2026-08-29T20_43_19.000+09_00.csv': {'group': 'perturbhopper_v4_friction', 'env': 'PerturbHopper-v4', 'perturbation': 'friction', 'rows': 5, 'run_ids': 5, 'state_counts': {'finished': 5}}}
 
 RUN_IDS_BY_GROUP = {
-    "walker2d_friction": [
-        "czlb5dfx",
-        "gr4300xn",
-        "nmfi04zj",
-        "ggxoz6i4",
-        "jy7pdwos",
-        "qu3hhxrv",
-        "mu8zj1hn",
-        "a9n2pw98",
-        "ea3ysx9v",
-        "i7uhz91e",
-        "plu47ae0",
-        "qb2z6kkg",
-        "drs1u2pf",
-        "m7kxy24p",
-        "ua7dzmw2",
+    "perturbhopper_v4_friction": [
+        "wykhp5mr",
+        "8bidooiw",
+        "kvgfuet6",
+        "4s7gp10v",
+        "srz1lpzy",
+        "hjwxyzjn",
+        "99lnoq39",
+        "2pd6fyr6",
+        "xh9uvvh3",
+        "mrxye88o",
+        "8zdy58mt",
+        "pju4dhm5",
+        "m6moi5jn",
+        "wh3hxxhz",
+        "0f8m67n8",
+        "e59qp6y7",
+        "i3np0e2w",
+        "6ywiwr2z",
+        "dtbsfuw2",
+        "0m9ys7aw",
+        "f74u7mf0",
+        "y1jjftpi",
+        "bhaifkqs",
+        "1005exr7",
+        "wna3xarb",
     ],
-    "walker2d_gravity": [
-        "hzq1vbci",
-        "j7aucfvp",
-        "gi0z952g",
-        "z18zcs3b",
-        "18akd1u5",
-        "t8s1u8gx",
-        "t3pmgyr6",
-        "4d4mqtto",
-        "5on8sz8s",
-        "yxasza2r",
-        "bl2oe8r5",
-        "xt7qmb9q",
-        "6yzej2ma",
-        "8nf8k7a2",
-        "he5whigu",
-    ],
-    "ant_gravity": [
-        "tp8d3fri",
-        "q1g12tpi",
-        "6xgq043i",
-        "jkzvlg1c",
-        "swkqm16n",
-        "x9ss54qp",
-        "hpgn6wiw",
-        "c2x8bsek",
-        "92p5z384",
-        "3jbw8q3z",
-        "k8a3hto6",
-        "h2umm1e6",
-        "ma7r91yc",
-        "y35f7iqv",
-        "67dgz2sk",
-    ],
-    "ant_friction": [
-        "ypj4x0nk",
-        "jdlkl4n9",
-        "858fctnm",
-        "k2f7owqv",
-        "f6hf7w0d",
-        "yrex3tvb",
-        "sr4l911o",
-        "9qi5bxd8",
-        "ujji7kb6",
-        "u13fqmfv",
-        "713avxqk",
-        "n0u98ysw",
-        "s97rbudy",
-        "4jq76n2p",
-        "k1xfqmqt",
+    "perturbhopper_v4_gravity": [
+        "9piffegk",
+        "ht44qec9",
+        "1nekt7v8",
+        "sp2y5lo3",
+        "8t7xgj4b",
+        "dey2ym7r",
+        "tyomjoc7",
+        "ms0f0yb1",
+        "ekcrueff",
+        "jnrxu6qq",
+        "3vvak6zi",
+        "6pa4a3cm",
+        "fejdju9y",
+        "sz9884sp",
+        "iihki5z3",
+        "575x6kvn",
+        "5y5403pw",
+        "v9izyhac",
+        "a1km3pnl",
+        "n64nrogv",
+        "u1izjz8m",
+        "xljees54",
+        "7iugacj3",
+        "pcojcy1h",
+        "tnxrqg3k",
     ],
 }
 
-RUN_IDS = list(dict.fromkeys(
-    run_id
-    for ids in RUN_IDS_BY_GROUP.values()
-    for run_id in ids
-))
+RUN_IDS = list(
+    dict.fromkeys(
+        run_id
+        for ids in RUN_IDS_BY_GROUP.values()
+        for run_id in ids
+    )
+)
 
 
 def json_safe(x):
     if x is None:
         return None
+
     if isinstance(x, float):
         return None if math.isnan(x) or math.isinf(x) else x
+
     if isinstance(x, (str, int, bool)):
         return x
+
     if isinstance(x, datetime):
         return x.isoformat()
 
     try:
         import numpy as np
+
         if isinstance(x, np.integer):
             return int(x)
+
         if isinstance(x, np.floating):
             x = float(x)
             return None if math.isnan(x) or math.isinf(x) else x
+
         if isinstance(x, np.ndarray):
             return x.tolist()
     except Exception:
@@ -133,8 +129,10 @@ def json_safe(x):
 
     if isinstance(x, dict):
         return {str(k): json_safe(v) for k, v in x.items()}
+
     if isinstance(x, (list, tuple)):
         return [json_safe(v) for v in x]
+
     return str(x)
 
 
@@ -225,6 +223,12 @@ def export_run(run, out_root: Path):
         f"- State: `{getattr(run, 'state', None)}`",
         f"- History rows: `{n_rows}`",
         "",
+        "## Files",
+        "- `metadata.json`",
+        "- `config.json`",
+        "- `summary.json`",
+        "- `history.jsonl`",
+        "",
         "## Logged keys",
         ", ".join(f"`{k}`" for k in sorted(all_keys)),
         "",
@@ -248,7 +252,10 @@ def export_run(run, out_root: Path):
         json.dumps(last_rows, ensure_ascii=False, indent=2),
         "```",
     ]
-    (out / "README_for_GPT.md").write_text("\n".join(readme), encoding="utf-8")
+    (out / "README_for_GPT.md").write_text(
+        "\n".join(readme),
+        encoding="utf-8",
+    )
 
     return {
         "id": run_id,
@@ -277,7 +284,11 @@ def main():
     for i, run_id in enumerate(RUN_IDS, start=1):
         group = group_for_run(run_id)
         api_path = f"{ENTITY}/{PROJECT}/{run_id}"
-        print(f"[{i:03d}/{len(RUN_IDS):03d}] {group} / {run_id}")
+
+        print(
+            f"[{i:03d}/{len(RUN_IDS):03d}] "
+            f"{group} / {run_id}"
+        )
 
         try:
             run = api.run(api_path)
@@ -285,12 +296,18 @@ def main():
 
             if ONLY_FINISHED and state != "finished":
                 print(f"    SKIP: state={state}")
-                skipped.append({"id": run_id, "group": group, "state": state})
+                skipped.append({
+                    "id": run_id,
+                    "group": group,
+                    "state": state,
+                })
                 continue
 
             result = export_run(run, out_root)
             exported.append(result)
-            print(f"    DONE: {result['history_rows']} history rows")
+            print(
+                f"    DONE: {result['history_rows']} history rows"
+            )
 
         except Exception as e:
             print(f"    ERROR: {e}")
@@ -301,21 +318,35 @@ def main():
                 "error": str(e),
             })
 
-    dump_json(out_root / "_run_ids_by_group.json", RUN_IDS_BY_GROUP)
-    dump_json(out_root / "_source_file_metadata.json", SOURCE_FILE_METADATA)
-    dump_json(out_root / "_export_summary.json", {
-        "entity": ENTITY,
-        "project": PROJECT,
-        "unique_run_count": len(RUN_IDS),
-        "only_finished": ONLY_FINISHED,
-        "expected_by_group": {g: len(ids) for g, ids in RUN_IDS_BY_GROUP.items()},
-        "exported_count": len(exported),
-        "skipped_count": len(skipped),
-        "error_count": len(errors),
-        "exported": exported,
-        "skipped": skipped,
-        "errors": errors,
-    })
+    dump_json(
+        out_root / "_run_ids_by_group.json",
+        RUN_IDS_BY_GROUP,
+    )
+
+    dump_json(
+        out_root / "_source_file_metadata.json",
+        SOURCE_FILE_METADATA,
+    )
+
+    dump_json(
+        out_root / "_export_summary.json",
+        {
+            "entity": ENTITY,
+            "project": PROJECT,
+            "unique_run_count": len(RUN_IDS),
+            "only_finished": ONLY_FINISHED,
+            "expected_by_group": {
+                g: len(ids)
+                for g, ids in RUN_IDS_BY_GROUP.items()
+            },
+            "exported_count": len(exported),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
+            "exported": exported,
+            "skipped": skipped,
+            "errors": errors,
+        },
+    )
 
     print()
     print("=" * 72)

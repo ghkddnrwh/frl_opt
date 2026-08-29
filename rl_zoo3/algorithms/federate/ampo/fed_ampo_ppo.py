@@ -48,6 +48,74 @@ def project_to_simplex(values: np.ndarray) -> np.ndarray:
     return projected / projected_sum
 
 
+def project_to_capped_simplex(values: np.ndarray, cap: float | None) -> np.ndarray:
+    """Euclidean projection onto {lambda >= 0, sum(lambda)=1, lambda_k <= cap}.
+
+    ``cap=None`` (or any cap >= 1) reduces exactly to the ordinary simplex
+    projection used by the original Fed-AMPO-PPO.  For a finite cap, the
+    feasible set is non-empty iff ``len(values) * cap >= 1``.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError(f"Expected a 1D vector, got shape={values.shape}.")
+    if values.size == 0:
+        raise ValueError("Cannot project an empty vector onto the capped simplex.")
+
+    if cap is None or float(cap) >= 1.0:
+        return project_to_simplex(values)
+
+    cap = float(cap)
+    if not np.isfinite(cap) or cap <= 0.0:
+        raise ValueError(f"dual_lambda_cap must be finite and positive, got {cap}.")
+    if values.size * cap < 1.0 - 1e-12:
+        raise ValueError(
+            "Infeasible capped simplex: num_clients * dual_lambda_cap must be >= 1. "
+            f"Got num_clients={values.size}, dual_lambda_cap={cap}."
+        )
+    if values.size == 1:
+        if cap < 1.0 - 1e-12:
+            raise ValueError("A single-client capped simplex requires dual_lambda_cap >= 1.")
+        return np.ones(1, dtype=np.float64)
+
+    # KKT form: x_i = clip(v_i - tau, 0, cap).  The sum is monotone in tau,
+    # so bisection gives the Euclidean projection without an external solver.
+    lower = float(np.min(values - cap)) - 1.0
+    upper = float(np.max(values)) + 1.0
+    for _ in range(100):
+        tau = 0.5 * (lower + upper)
+        projected = np.clip(values - tau, 0.0, cap)
+        if float(np.sum(projected)) > 1.0:
+            lower = tau
+        else:
+            upper = tau
+
+    projected = np.clip(values - 0.5 * (lower + upper), 0.0, cap)
+    residual = 1.0 - float(np.sum(projected))
+    if abs(residual) > 1e-10:
+        if residual > 0.0:
+            free = np.flatnonzero(projected < cap - 1e-12)
+            for idx in free:
+                add = min(residual, cap - float(projected[idx]))
+                projected[idx] += add
+                residual -= add
+                if residual <= 1e-12:
+                    break
+        else:
+            free = np.flatnonzero(projected > 1e-12)
+            for idx in free:
+                remove = min(-residual, float(projected[idx]))
+                projected[idx] -= remove
+                residual += remove
+                if residual >= -1e-12:
+                    break
+
+    if abs(float(np.sum(projected)) - 1.0) > 1e-8:
+        raise RuntimeError("Capped-simplex projection failed to satisfy the unit-sum constraint.")
+    if np.any(projected < -1e-10) or np.any(projected > cap + 1e-10):
+        raise RuntimeError("Capped-simplex projection violated its box constraints.")
+    return np.clip(projected, 0.0, cap)
+
+
 class _RawRewardCaptureCallback(BaseCallback):
     """Capture raw/normalized training rewards and episode completions for the dual estimator."""
 
@@ -74,8 +142,8 @@ class _RawRewardCaptureCallback(BaseCallback):
         return True
 
 
-class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
-    """Fed-AMPO-PPO implemented directly from the AMPO/PPO algorithm.
+class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
+    """Fed-AMPO-GroupPPO: Fed-AMPO-PPO with an optional capped dual simplex.
 
     Paper-level round:
       1. the server broadcasts the shared actor theta,
@@ -90,6 +158,18 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
     The dual estimator keeps full episodic returns across rollout/federated
     boundaries, smooths them with a client-local EMA, and can standardize the
     cross-client signal with an EMA of its standard deviation.
+
+    ``dual_lambda_cap=None`` (default) leaves the dual unconstrained beyond the
+    ordinary simplex and therefore reproduces the original Fed-AMPO-PPO update.
+    Setting ``dual_lambda_cap=c < 1`` projects the dual onto
+    {lambda >= 0, sum(lambda)=1, lambda_k <= c}, preventing a single client from
+    monopolizing all adversarial mass and turning strict single-worst focusing
+    into worst-group / lower-tail focusing.
+
+    Gradient-geometry diagnostics are server-side measurements only; they do not
+    modify the actor update.  They report client/aggregate cosine alignment,
+    high-lambda conflict rates, and the gap between lambda weights and actual
+    lambda_k * ||g_k|| contribution magnitudes.
 
     ``dual_update_mode="uniform"`` freezes lambda to 1/K for the ablation.
     ``critic_sync_mode="local"`` is the paper default; ``"fedavg"`` and
@@ -134,6 +214,9 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         "dual_scale_mode",
         "dual_scale_ema_beta",
         "dual_scale_epsilon",
+        "dual_lambda_cap",
+        "worst_group_lambda_cap",
+        "gradient_diagnostics",
         "log_wandb",
     )
 
@@ -172,6 +255,11 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         self.dual_scale_epsilon = float(kwargs.pop("dual_scale_epsilon", 1e-8))
         if self.dual_scale_epsilon <= 0.0:
             raise ValueError("dual_scale_epsilon must be positive.")
+
+        cap_alias = kwargs.pop("worst_group_lambda_cap", None)
+        raw_lambda_cap = kwargs.pop("dual_lambda_cap", cap_alias)
+        self.dual_lambda_cap = self._normalize_dual_lambda_cap(raw_lambda_cap)
+        self.gradient_diagnostics = self._as_bool(kwargs.pop("gradient_diagnostics", True))
 
         raw_dual_mode = kwargs.pop("dual_update_mode", None)
         fixed_uniform = self._as_bool(kwargs.pop("fixed_uniform_lambda", False)) or self._as_bool(
@@ -246,6 +334,21 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
             return False
         raise ValueError(f"Cannot interpret {value!r} as a boolean.")
+
+    @staticmethod
+    def _normalize_dual_lambda_cap(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "none", "null", "off", "false", "unbounded", "inf", "infinity"}:
+                return None
+        cap = float(value)
+        if not np.isfinite(cap) or cap <= 0.0:
+            raise ValueError(f"dual_lambda_cap must be in (0, 1] or None, got {value!r}.")
+        if cap >= 1.0:
+            return None
+        return cap
 
     @classmethod
     def _normalize_dual_update_mode(cls, mode: str) -> str:
@@ -561,7 +664,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
     @staticmethod
     def _mix_modules(old: FederatedModules, new: FederatedModules, mix_weight: float) -> FederatedModules:
         if mix_weight >= 1.0:
-            return FedAMPOPPO._clone_modules(new)
+            return FedAMPOGroupPPO._clone_modules(new)
         mixed: FederatedModules = {}
         for module_name, new_state in new.items():
             mixed[module_name] = OrderedDict()
@@ -619,6 +722,34 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         return float(np.sqrt(total))
 
     @staticmethod
+    def _module_dot(left: FederatedModules, right: FederatedModules) -> float:
+        total = 0.0
+        for module_name, left_state in left.items():
+            if module_name not in right:
+                raise KeyError(f"Missing module {module_name!r} in gradient diagnostic operand.")
+            for key, left_value in left_state.items():
+                if not th.is_floating_point(left_value):
+                    continue
+                right_value = right[module_name][key].to(dtype=left_value.dtype)
+                total += float(
+                    th.sum(
+                        left_value.detach().to(dtype=th.float64)
+                        * right_value.detach().to(dtype=th.float64)
+                    ).cpu().item()
+                )
+        return total
+
+    @classmethod
+    def _module_cosine(cls, left: FederatedModules, right: FederatedModules, eps: float = 1e-12) -> float:
+        left_norm = cls._module_l2_norm(left)
+        right_norm = cls._module_l2_norm(right)
+        denom = left_norm * right_norm
+        if not np.isfinite(denom) or denom <= eps:
+            return float("nan")
+        cosine = cls._module_dot(left, right) / denom
+        return float(np.clip(cosine, -1.0, 1.0))
+
+    @staticmethod
     def _simplex_entropy(weights: np.ndarray) -> float:
         safe = np.clip(np.asarray(weights, dtype=np.float64), 1e-12, 1.0)
         return float(-np.sum(safe * np.log(safe)))
@@ -636,11 +767,30 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(f"num_clients must be positive, got {num_clients}.")
         return np.ones(num_clients, dtype=np.float64) / float(num_clients)
 
+    def _validate_dual_lambda_cap(self, num_clients: int) -> None:
+        if self.dual_lambda_cap is None:
+            return
+        if float(num_clients) * float(self.dual_lambda_cap) < 1.0 - 1e-12:
+            raise ValueError(
+                "dual_lambda_cap is infeasible for the current number of clients: "
+                f"num_clients={num_clients}, dual_lambda_cap={self.dual_lambda_cap}. "
+                "Require num_clients * dual_lambda_cap >= 1."
+            )
+
+    def _project_dual_weights(self, values: np.ndarray, num_clients: int) -> np.ndarray:
+        self._validate_dual_lambda_cap(num_clients)
+        return project_to_capped_simplex(values, self.dual_lambda_cap)
+
     def _ensure_lambda(self, num_clients: int) -> None:
+        self._validate_dual_lambda_cap(num_clients)
         if self.dual_update_mode == "uniform":
             self.lambda_weights = self._uniform_lambda(num_clients)
             return
         if self.lambda_weights is not None and self.lambda_weights.shape == (num_clients,):
+            # Preserve the original Fed-AMPO behavior exactly when no cap is
+            # configured.  Only an active worst-group cap reprojects resumed state.
+            if self.dual_lambda_cap is not None:
+                self.lambda_weights = self._project_dual_weights(self.lambda_weights, num_clients)
             return
         if self.initial_lambda is None:
             self.lambda_weights = self._uniform_lambda(num_clients)
@@ -648,7 +798,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         initial = np.asarray(self.initial_lambda, dtype=np.float64)
         if initial.shape != (num_clients,):
             raise ValueError(f"initial_lambda shape mismatch: expected {(num_clients,)}, got {initial.shape}.")
-        self.lambda_weights = project_to_simplex(initial)
+        self.lambda_weights = self._project_dual_weights(initial, num_clients)
 
     def _current_server_actor_lr(self) -> float:
         if self.server_actor_lr is not None:
@@ -999,6 +1149,8 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             "dual_scale_mode": self.dual_scale_mode,
             "dual_scale_ema_beta": self.dual_scale_ema_beta,
             "dual_scale_epsilon": self.dual_scale_epsilon,
+            "dual_lambda_cap": self.dual_lambda_cap,
+            "gradient_diagnostics": bool(self.gradient_diagnostics),
             "dual_return_ready": self._ampo_dual_return_ema is not None,
             "dual_completed_episodes": int(self._ampo_dual_completed_episodes),
             "dual_completed_episodes_last_update": int(self._ampo_last_completed_episodes),
@@ -1073,6 +1225,9 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         dual_warmup_min_episodes = int(_shared_value("dual_warmup_min_episodes", 1))
         dual_scale_ema_beta = float(_shared_value("dual_scale_ema_beta", 0.95))
         dual_scale_epsilon = float(_shared_value("dual_scale_epsilon", 1e-8))
+        raw_dual_lambda_cap = _shared_value("dual_lambda_cap", None)
+        dual_lambda_cap = cls._normalize_dual_lambda_cap(raw_dual_lambda_cap)
+        gradient_diagnostics = cls._as_bool(_shared_value("gradient_diagnostics", True))
 
         payload: FederatedPayload = {
             "client_actor_gradients": [upload["actor_gradient"] for upload in uploads],
@@ -1092,6 +1247,8 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             "dual_scale_mode": next(iter(scale_modes)),
             "dual_scale_ema_beta": dual_scale_ema_beta,
             "dual_scale_epsilon": dual_scale_epsilon,
+            "dual_lambda_cap": dual_lambda_cap,
+            "gradient_diagnostics": bool(gradient_diagnostics),
             "client_dual_return_ready": np.asarray(
                 [bool(upload.get("dual_return_ready", False)) for upload in uploads], dtype=bool
             ),
@@ -1161,6 +1318,8 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         payload_scale_mode = self._normalize_dual_scale_mode(
             str(payload.get("dual_scale_mode", "std_ema"))
         )
+        payload_lambda_cap = self._normalize_dual_lambda_cap(payload.get("dual_lambda_cap", None))
+        payload_gradient_diagnostics = self._as_bool(payload.get("gradient_diagnostics", True))
         if payload_critic_mode != self.critic_sync_mode:
             raise ValueError(
                 f"Server critic_sync_mode={self.critic_sync_mode!r} does not match payload {payload_critic_mode!r}."
@@ -1181,6 +1340,14 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         if payload_scale_mode != self.dual_scale_mode:
             raise ValueError(
                 f"Server dual_scale_mode={self.dual_scale_mode!r} does not match payload {payload_scale_mode!r}."
+            )
+        if payload_lambda_cap != self.dual_lambda_cap:
+            raise ValueError(
+                f"Server dual_lambda_cap={self.dual_lambda_cap!r} does not match payload {payload_lambda_cap!r}."
+            )
+        if payload_gradient_diagnostics != self.gradient_diagnostics:
+            raise ValueError(
+                "Server gradient_diagnostics setting does not match the aggregated client payload."
             )
 
         client_actor_gradients: list[FederatedModules] = payload["client_actor_gradients"]
@@ -1290,18 +1457,26 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
                     dual_update_skipped_small_scale = True
                 else:
                     dual_signal = (client_returns - float(np.mean(client_returns))) / scale
-                    self.lambda_weights = project_to_simplex(
-                        self.lambda_weights - self.dual_lr * dual_signal
+                    self.lambda_weights = self._project_dual_weights(
+                        self.lambda_weights - self.dual_lr * dual_signal,
+                        num_clients,
                     )
                     dual_update_applied = True
             else:
-                self.lambda_weights = project_to_simplex(
-                    self.lambda_weights - self.dual_lr * client_returns
+                self.lambda_weights = self._project_dual_weights(
+                    self.lambda_weights - self.dual_lr * client_returns,
+                    num_clients,
                 )
                 dual_update_applied = True
 
         lambda_after = self.lambda_weights.copy()
         client_gradient_norms = [self._module_l2_norm(client_gradient) for client_gradient in client_actor_gradients]
+        gradient_diagnostics = self._compute_gradient_diagnostics(
+            client_actor_gradients=client_actor_gradients,
+            aggregated_gradient=aggregated_gradient,
+            lambda_actor=lambda_before,
+            client_returns=client_returns,
+        )
         self._record_server_metrics(
             num_clients=num_clients,
             client_returns=client_returns,
@@ -1320,8 +1495,75 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             dual_update_skipped_small_scale=dual_update_skipped_small_scale,
             dual_signal=dual_signal,
             current_return_spread=current_return_spread,
+            gradient_diagnostics=gradient_diagnostics,
         )
         self._apply_vecnormalize_from_payload(payload)
+
+    def _compute_gradient_diagnostics(
+        self,
+        *,
+        client_actor_gradients: Sequence[FederatedModules],
+        aggregated_gradient: FederatedModules,
+        lambda_actor: np.ndarray,
+        client_returns: np.ndarray,
+    ) -> dict[str, Any]:
+        num_clients = len(client_actor_gradients)
+        empty = {
+            "client_to_aggregate_cosines": np.full(num_clients, np.nan, dtype=np.float64),
+            "pairwise_cosines": np.full((num_clients, num_clients), np.nan, dtype=np.float64),
+            "contribution_norms": np.zeros(num_clients, dtype=np.float64),
+            "influence_shares": np.zeros(num_clients, dtype=np.float64),
+            "high_lambda_mask": np.zeros(num_clients, dtype=bool),
+            "high_lambda_conflict_rate": float("nan"),
+            "worst_client_index": int(np.argmin(client_returns)) if num_clients > 0 else -1,
+            "top_lambda_client_index": int(np.argmax(lambda_actor)) if num_clients > 0 else -1,
+        }
+        if not self.gradient_diagnostics or num_clients == 0:
+            return empty
+
+        client_to_aggregate = np.asarray(
+            [self._module_cosine(gradient, aggregated_gradient) for gradient in client_actor_gradients],
+            dtype=np.float64,
+        )
+        pairwise = np.full((num_clients, num_clients), np.nan, dtype=np.float64)
+        for i in range(num_clients):
+            pairwise[i, i] = 1.0
+            for j in range(i + 1, num_clients):
+                cosine = self._module_cosine(client_actor_gradients[i], client_actor_gradients[j])
+                pairwise[i, j] = cosine
+                pairwise[j, i] = cosine
+
+        gradient_norms = np.asarray(
+            [self._module_l2_norm(gradient) for gradient in client_actor_gradients],
+            dtype=np.float64,
+        )
+        contribution_norms = np.asarray(lambda_actor, dtype=np.float64) * gradient_norms
+        contribution_sum = float(np.sum(contribution_norms))
+        if contribution_sum > 1e-12 and np.isfinite(contribution_sum):
+            influence_shares = contribution_norms / contribution_sum
+        else:
+            influence_shares = np.zeros(num_clients, dtype=np.float64)
+
+        uniform_weight = 1.0 / float(num_clients)
+        high_lambda_mask = np.asarray(lambda_actor, dtype=np.float64) > uniform_weight + 1e-12
+        high_lambda_cosines = client_to_aggregate[high_lambda_mask]
+        finite_high = high_lambda_cosines[np.isfinite(high_lambda_cosines)]
+        conflict_rate = (
+            float(np.mean(finite_high < 0.0))
+            if finite_high.size > 0
+            else float("nan")
+        )
+
+        return {
+            "client_to_aggregate_cosines": client_to_aggregate,
+            "pairwise_cosines": pairwise,
+            "contribution_norms": contribution_norms,
+            "influence_shares": influence_shares,
+            "high_lambda_mask": high_lambda_mask,
+            "high_lambda_conflict_rate": conflict_rate,
+            "worst_client_index": int(np.argmin(client_returns)),
+            "top_lambda_client_index": int(np.argmax(lambda_actor)),
+        }
 
     def _weighted_module_sum(
         self,
@@ -1361,6 +1603,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         dual_update_skipped_small_scale: bool,
         dual_signal: np.ndarray,
         current_return_spread: float,
+        gradient_diagnostics: dict[str, Any],
     ) -> None:
         metrics: dict[str, float] = {
             "server/num_clients": float(num_clients),
@@ -1406,9 +1649,77 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             "server/ampo/lambda_entropy": self._simplex_entropy(lambda_after),
             "server/ampo/lambda_min": float(np.min(lambda_after)),
             "server/ampo/lambda_max": float(np.max(lambda_after)),
+            "server/ampo/lambda_actor_min": float(np.min(lambda_before)),
+            "server/ampo/lambda_actor_max": float(np.max(lambda_before)),
+            "server/ampo/lambda_actor_effective_clients": self._effective_num_clients(lambda_before),
             "server/ampo/lambda_delta_norm": float(np.linalg.norm(lambda_after - lambda_before)),
             "server/ampo/effective_clients": self._effective_num_clients(lambda_after),
+            "server/ampo/worst_group_cap_active": float(self.dual_lambda_cap is not None),
+            "server/ampo/worst_group_lambda_cap": float(self.dual_lambda_cap)
+            if self.dual_lambda_cap is not None else 1.0,
+            "server/ampo/worst_group_min_support": float(
+                1 if self.dual_lambda_cap is None else int(np.ceil(1.0 / self.dual_lambda_cap - 1e-12))
+            ),
+            "server/ampo/lambda_support_size": float(np.sum(lambda_after > 1e-12)),
+            "server/ampo/lambda_num_at_cap": float(
+                0 if self.dual_lambda_cap is None
+                else np.sum(lambda_after >= self.dual_lambda_cap - 1e-9)
+            ),
+            "server/ampo/gradient_diagnostics_enabled": float(self.gradient_diagnostics),
         }
+
+        client_to_aggregate = np.asarray(
+            gradient_diagnostics.get("client_to_aggregate_cosines", np.full(num_clients, np.nan)),
+            dtype=np.float64,
+        )
+        pairwise_cosines = np.asarray(
+            gradient_diagnostics.get("pairwise_cosines", np.full((num_clients, num_clients), np.nan)),
+            dtype=np.float64,
+        )
+        contribution_norms = np.asarray(
+            gradient_diagnostics.get("contribution_norms", np.zeros(num_clients)),
+            dtype=np.float64,
+        )
+        influence_shares = np.asarray(
+            gradient_diagnostics.get("influence_shares", np.zeros(num_clients)),
+            dtype=np.float64,
+        )
+        high_lambda_mask = np.asarray(
+            gradient_diagnostics.get("high_lambda_mask", np.zeros(num_clients, dtype=bool)),
+            dtype=bool,
+        )
+        worst_idx = int(gradient_diagnostics.get("worst_client_index", int(np.argmin(client_returns))))
+        top_lambda_idx = int(gradient_diagnostics.get("top_lambda_client_index", int(np.argmax(lambda_before))))
+
+        finite_client_cos = client_to_aggregate[np.isfinite(client_to_aggregate)]
+        if finite_client_cos.size > 0:
+            metrics["server/ampo/grad_cosine_to_aggregate_mean"] = float(np.mean(finite_client_cos))
+            metrics["server/ampo/grad_cosine_to_aggregate_min"] = float(np.min(finite_client_cos))
+            metrics["server/ampo/grad_cosine_to_aggregate_max"] = float(np.max(finite_client_cos))
+        if 0 <= worst_idx < num_clients:
+            metrics["server/ampo/worst_return_grad_cosine_to_aggregate"] = float(client_to_aggregate[worst_idx])
+        if 0 <= top_lambda_idx < num_clients:
+            metrics["server/ampo/top_lambda_grad_cosine_to_aggregate"] = float(client_to_aggregate[top_lambda_idx])
+        metrics["server/ampo/high_lambda_conflict_rate"] = float(
+            gradient_diagnostics.get("high_lambda_conflict_rate", float("nan"))
+        )
+        metrics["server/ampo/high_lambda_client_count"] = float(np.sum(high_lambda_mask))
+
+        if num_clients > 1:
+            off_diagonal = pairwise_cosines[~np.eye(num_clients, dtype=bool)]
+            finite_pairwise = off_diagonal[np.isfinite(off_diagonal)]
+            if finite_pairwise.size > 0:
+                metrics["server/ampo/pairwise_grad_cosine_mean"] = float(np.mean(finite_pairwise))
+                metrics["server/ampo/pairwise_grad_cosine_min"] = float(np.min(finite_pairwise))
+                metrics["server/ampo/pairwise_grad_conflict_rate"] = float(np.mean(finite_pairwise < 0.0))
+
+        if float(np.sum(influence_shares)) > 0.0:
+            metrics["server/ampo/lambda_influence_l1_gap"] = float(
+                np.sum(np.abs(influence_shares - lambda_before))
+            )
+            metrics["server/ampo/max_influence_share"] = float(np.max(influence_shares))
+            metrics["server/ampo/max_influence_client"] = float(np.argmax(influence_shares))
+            metrics["server/ampo/max_influence_is_worst_return"] = float(int(np.argmax(influence_shares)) == worst_idx)
         if client_num_actor_batches.size > 0:
             metrics["server/ampo/actor_batches_mean"] = float(np.mean(client_num_actor_batches))
         for client_idx, (client_return, lambda_weight, grad_norm) in enumerate(
@@ -1416,6 +1727,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         ):
             metrics[f"server/ampo/client_{client_idx}/return"] = float(client_return)
             metrics[f"server/ampo/client_{client_idx}/lambda"] = float(lambda_weight)
+            metrics[f"server/ampo/client_{client_idx}/lambda_actor"] = float(lambda_before[client_idx])
             metrics[f"server/ampo/client_{client_idx}/grad_norm"] = float(grad_norm)
             metrics[f"server/ampo/client_{client_idx}/completed_episodes"] = float(
                 client_completed_episodes[client_idx]
@@ -1424,6 +1736,29 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
                 client_completed_episodes_last_update[client_idx]
             )
             metrics[f"server/ampo/client_{client_idx}/dual_signal"] = float(dual_signal[client_idx])
+            if client_idx < client_to_aggregate.size:
+                metrics[f"server/ampo/client_{client_idx}/grad_cosine_to_aggregate"] = float(
+                    client_to_aggregate[client_idx]
+                )
+            if client_idx < contribution_norms.size:
+                metrics[f"server/ampo/client_{client_idx}/lambda_grad_norm"] = float(
+                    contribution_norms[client_idx]
+                )
+            if client_idx < influence_shares.size:
+                metrics[f"server/ampo/client_{client_idx}/gradient_influence_share"] = float(
+                    influence_shares[client_idx]
+                )
+            if client_idx < high_lambda_mask.size:
+                metrics[f"server/ampo/client_{client_idx}/high_lambda"] = float(high_lambda_mask[client_idx])
+            if self.dual_lambda_cap is not None:
+                metrics[f"server/ampo/client_{client_idx}/lambda_at_cap"] = float(
+                    lambda_weight >= self.dual_lambda_cap - 1e-9
+                )
+
+        if self.gradient_diagnostics and num_clients <= 16:
+            for i in range(num_clients):
+                for j in range(i + 1, num_clients):
+                    metrics[f"server/ampo/grad_cosine/client_{i}_client_{j}"] = float(pairwise_cosines[i, j])
         self._last_federated_metrics = metrics
 
     def get_client_weight(self) -> float:
@@ -1439,6 +1774,8 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
             "dual_return_source": self.dual_return_source,
             "dual_return_mode": self.dual_return_mode,
             "dual_scale_mode": self.dual_scale_mode,
+            "dual_lambda_cap": self.dual_lambda_cap,
+            "gradient_diagnostics": bool(self.gradient_diagnostics),
             "vecnormalize": self._get_filtered_vecnormalize_state(),
         }
         if self._uses_global_critic():
@@ -1448,7 +1785,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
     @staticmethod
     def _get_rms_state(rms: Any) -> RunningMeanStdState | dict[str, RunningMeanStdState]:
         if isinstance(rms, Mapping):
-            return {key: FedAMPOPPO._get_rms_state(value) for key, value in rms.items()}
+            return {key: FedAMPOGroupPPO._get_rms_state(value) for key, value in rms.items()}
         return {
             "mean": np.asarray(rms.mean, dtype=np.float64).copy(),
             "var": np.asarray(rms.var, dtype=np.float64).copy(),
@@ -1460,7 +1797,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         if isinstance(rms, Mapping):
             for key, value in state.items():
                 if key in rms:
-                    FedAMPOPPO._set_rms_state(rms[key], value)
+                    FedAMPOGroupPPO._set_rms_state(rms[key], value)
             return
 
         mean = np.asarray(state["mean"], dtype=np.float64)
@@ -1547,7 +1884,7 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         if isinstance(state, np.ndarray):
             return state.copy()
         if isinstance(state, Mapping):
-            return {key: FedAMPOPPO._clone_state(value) for key, value in state.items()}
+            return {key: FedAMPOGroupPPO._clone_state(value) for key, value in state.items()}
         return state
 
     @staticmethod
@@ -1679,4 +2016,10 @@ class FedAMPOPPO(FederatedAlgorithmMixin, PPO):
         return averaged
 
 
-FedAMPPO = FedAMPOPPO
+# Canonical name for the capped-simplex / worst-group extension.
+FedAMPOWorstGroupPPO = FedAMPOGroupPPO
+
+# Backward-compatible aliases. With dual_lambda_cap=None (the default), these
+# reproduce the original Fed-AMPO-PPO optimization behavior.
+FedAMPOPPO = FedAMPOGroupPPO
+FedAMPPO = FedAMPOGroupPPO
