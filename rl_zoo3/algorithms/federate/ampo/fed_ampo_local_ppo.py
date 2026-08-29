@@ -106,6 +106,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     rollout minibatch.  Each client keeps its own momentum state across local
     minibatches and communication rounds; the state is initialized from the
     first global-reference gradient when momentum mode is first activated.
+
+    ``dual_aware_drift_mode="none"`` is the default and preserves the original
+    algorithm. ``"diagnostic"`` logs local-policy KL without changing training.
+    ``"kl_gate"`` optionally suppresses only high-lambda client deltas when their
+    local PPO KL exceeds ``dual_aware_kl_target``; the dual update itself is not
+    changed.
     """
 
     federated_actor_module_name = "policy"
@@ -117,6 +123,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     valid_dual_return_modes: tuple[str, ...] = ("discounted", "undiscounted")
     valid_dual_scale_modes: tuple[str, ...] = ("none", "std_ema")
     valid_local_actor_update_modes: tuple[str, ...] = ("standard", "momentum")
+    valid_dual_aware_drift_modes: tuple[str, ...] = ("none", "diagnostic", "kl_gate")
 
     federated_manager_keys: tuple[str, ...] = (
         "num_clients",
@@ -151,6 +158,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         "actor_update_mode",
         "momentum_beta",
         "local_momentum_beta",
+        "dual_aware_drift_mode",
+        "dual_aware_kl_target",
+        "dual_aware_correction_strength",
+        "dual_aware_min_delta_scale",
         "log_wandb",
     )
 
@@ -217,6 +228,22 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if not (0.0 <= self.momentum_beta <= 1.0):
             raise ValueError(f"momentum_beta must be in [0, 1], got {self.momentum_beta}.")
 
+        # Optional dual-aware drift control.  The default ``none`` leaves the
+        # original FedAMPO-LocalPPO optimization path unchanged.  ``diagnostic``
+        # measures local-policy KL without changing the update, while ``kl_gate``
+        # attenuates only high-dual-weight client deltas whose local PPO drift is
+        # above the configured KL target.
+        self.dual_aware_drift_mode = self._normalize_dual_aware_drift_mode(
+            kwargs.pop("dual_aware_drift_mode", "diagnostic")
+        )
+        raw_dual_aware_kl_target = kwargs.pop("dual_aware_kl_target", None)
+        self.dual_aware_correction_strength = float(kwargs.pop("dual_aware_correction_strength", 1.0))
+        if not (0.0 <= self.dual_aware_correction_strength <= 1.0):
+            raise ValueError("dual_aware_correction_strength must be in [0, 1].")
+        self.dual_aware_min_delta_scale = float(kwargs.pop("dual_aware_min_delta_scale", 0.5))
+        if not (0.0 < self.dual_aware_min_delta_scale <= 1.0):
+            raise ValueError("dual_aware_min_delta_scale must be in (0, 1].")
+
         raw_dual_mode = kwargs.pop("dual_update_mode", None)
         fixed_uniform = self._as_bool(kwargs.pop("fixed_uniform_lambda", False)) or self._as_bool(
             kwargs.pop("dual_fixed_uniform", False)
@@ -231,6 +258,17 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
 
         super().__init__(*args, **kwargs)
 
+        if raw_dual_aware_kl_target is None:
+            # Reuse PPO's target_kl when available; otherwise use a modest
+            # diagnostic/gating reference.  This value is inert in mode="none".
+            self.dual_aware_kl_target = (
+                float(self.target_kl) if self.target_kl is not None else 0.02
+            )
+        else:
+            self.dual_aware_kl_target = float(raw_dual_aware_kl_target)
+        if self.dual_aware_kl_target <= 0.0:
+            raise ValueError("dual_aware_kl_target must be positive.")
+
         self.lambda_weights: np.ndarray | None = None
         self._ampo_last_actor_delta: FederatedModules | None = None
         self._ampo_last_return: float | None = None
@@ -241,6 +279,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_reference_actor_grad_norm: float = 0.0
         self._ampo_last_gradient_difference_norm: float = 0.0
         self._ampo_last_corrected_actor_grad_norm: float = 0.0
+        self._ampo_last_local_actor_kl_mean: float = float("nan")
+        self._ampo_last_local_actor_kl_max: float = float("nan")
+        self._ampo_last_gradient_cosine_mean: float = float("nan")
+        self._ampo_last_gradient_cosine_min: float = float("nan")
         self._ampo_actor_momentum_state: dict[str, th.Tensor] | None = None
 
         # Training-stream episodic dual estimator. Partial episodes survive
@@ -355,6 +397,30 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(
                 f"Unsupported local_actor_update_mode={mode!r}. "
                 f"Choose one of {cls.valid_local_actor_update_modes}."
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_dual_aware_drift_mode(cls, mode: str) -> str:
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "off": "none",
+            "false": "none",
+            "disabled": "none",
+            "log": "diagnostic",
+            "diagnostics": "diagnostic",
+            "monitor": "diagnostic",
+            "kl": "kl_gate",
+            "gate": "kl_gate",
+            "dual_aware": "kl_gate",
+            "dual_aware_kl": "kl_gate",
+            "kl_gated": "kl_gate",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_dual_aware_drift_modes:
+            raise ValueError(
+                f"Unsupported dual_aware_drift_mode={mode!r}. "
+                f"Choose one of {cls.valid_dual_aware_drift_modes}."
             )
         return normalized
 
@@ -704,6 +770,50 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             return 0.0
         return 1.0 / denom
 
+    def _compute_dual_aware_delta_scales(
+        self,
+        lambda_weights: np.ndarray,
+        client_kl_maxes: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return per-client delta scales and diagnostics for dual-aware KL gating.
+
+        The gate is deliberately one-sided: a client is attenuated only when
+        (i) its current AMPO weight is above uniform and (ii) its local PPO KL
+        exceeds the reference target.  Thus uniform/dual-off training is exactly
+        unchanged even when ``kl_gate`` is enabled.
+
+        Let a_k = max(K lambda_k - 1, 0)/(K-1), and for KL_k > tau let
+        d_k = (KL_k/tau - 1)/(KL_k/tau).  The risk q_k=a_k d_k lies in [0,1],
+        and the server uses s_k=max(s_min, 1-alpha q_k).
+        """
+        weights = np.asarray(lambda_weights, dtype=np.float64)
+        kl_values = np.asarray(client_kl_maxes, dtype=np.float64)
+        if weights.ndim != 1 or kl_values.shape != weights.shape:
+            raise ValueError(
+                f"dual-aware shape mismatch: lambda={weights.shape}, kl={kl_values.shape}."
+            )
+        num_clients = int(weights.size)
+        scales = np.ones(num_clients, dtype=np.float64)
+        importance = np.zeros(num_clients, dtype=np.float64)
+        drift = np.zeros(num_clients, dtype=np.float64)
+        risk = np.zeros(num_clients, dtype=np.float64)
+        if num_clients <= 1 or self.dual_aware_drift_mode == "none":
+            return scales, importance, drift, risk
+
+        importance = np.maximum(num_clients * weights - 1.0, 0.0) / float(num_clients - 1)
+        finite = np.isfinite(kl_values)
+        ratio = np.zeros(num_clients, dtype=np.float64)
+        ratio[finite] = kl_values[finite] / float(self.dual_aware_kl_target)
+        excess = np.maximum(ratio - 1.0, 0.0)
+        # Smoothly maps 1x target -> 0, 2x -> 0.5, and large excess -> 1.
+        drift = np.divide(excess, 1.0 + excess, out=np.zeros_like(excess), where=np.isfinite(excess))
+        risk = np.clip(importance * drift, 0.0, 1.0)
+
+        if self.dual_aware_drift_mode == "kl_gate":
+            scales = 1.0 - self.dual_aware_correction_strength * risk
+            scales = np.clip(scales, self.dual_aware_min_delta_scale, 1.0)
+        return scales, importance, drift, risk
+
     @staticmethod
     def _uniform_lambda(num_clients: int) -> np.ndarray:
         if num_clients <= 0:
@@ -940,6 +1050,34 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             total += float(th.sum(tensor * tensor).cpu().item())
         return float(np.sqrt(total))
 
+    @staticmethod
+    def _named_gradient_cosine(
+        first: Mapping[str, th.Tensor],
+        second: Mapping[str, th.Tensor],
+        epsilon: float = 1e-12,
+    ) -> float:
+        dot = 0.0
+        first_sq = 0.0
+        second_sq = 0.0
+        shared_names = set(first.keys()) & set(second.keys())
+        for name in shared_names:
+            a = first[name].detach().to(dtype=th.float64)
+            b = second[name].detach().to(device=a.device, dtype=th.float64)
+            dot += float(th.sum(a * b).cpu().item())
+            first_sq += float(th.sum(a * a).cpu().item())
+            second_sq += float(th.sum(b * b).cpu().item())
+        denom = float(np.sqrt(first_sq * second_sq))
+        if denom <= epsilon:
+            return float("nan")
+        return float(np.clip(dot / denom, -1.0, 1.0))
+
+    @staticmethod
+    def _approx_kl_from_log_prob(log_prob: th.Tensor, old_log_prob: th.Tensor) -> float:
+        with th.no_grad():
+            log_ratio = log_prob - old_log_prob
+            approx_kl = th.mean((th.exp(log_ratio) - 1.0) - log_ratio)
+        return float(approx_kl.detach().cpu().item())
+
     def _capture_named_gradients(
         self,
         parameter_names: Sequence[str] | None = None,
@@ -1011,6 +1149,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         learning_rate = self.lr_schedule(self._current_progress_remaining)
         self._set_optimizer_learning_rate(self.policy.optimizer, float(learning_rate))
 
+        approx_kls: list[float] = []
         num_batches = 0
         continue_training = True
         for _ in range(self.n_epochs):
@@ -1034,6 +1173,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 )
                 loss = actor_minimization_loss + critic_minimization_loss
 
+                # Keep the default path identical: KL is evaluated only when PPO
+                # already needs target_kl or the optional diagnostic/gate is enabled.
+                approx_kl: float | None = None
+                if self.target_kl is not None or self.dual_aware_drift_mode != "none":
+                    approx_kl = self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob)
+                    if self.dual_aware_drift_mode != "none":
+                        approx_kls.append(approx_kl)
+
                 self.policy.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
@@ -1041,9 +1188,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 num_batches += 1
 
                 if self.target_kl is not None:
-                    with th.no_grad():
-                        log_ratio = log_prob - rollout_data.old_log_prob
-                        approx_kl = th.mean((th.exp(log_ratio) - 1.0) - log_ratio).cpu().item()
+                    assert approx_kl is not None
                     if approx_kl > 1.5 * self.target_kl:
                         continue_training = False
                         break
@@ -1054,6 +1199,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if num_batches == 0:
             raise RuntimeError("No rollout minibatches were available for local PPO optimization.")
         self._ampo_last_num_actor_batches = num_batches
+        if approx_kls:
+            self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
+            self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
 
 
     def _update_local_actor_and_critic_momentum(
@@ -1094,6 +1242,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         reference_norms: list[float] = []
         difference_norms: list[float] = []
         corrected_norms: list[float] = []
+        gradient_cosines: list[float] = []
+        approx_kls: list[float] = []
 
         num_batches = 0
         continue_training = True
@@ -1119,6 +1269,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     values,
                     rollout_data,
                 )
+
+                approx_kl: float | None = None
+                if self.target_kl is not None or self.dual_aware_drift_mode != "none":
+                    approx_kl = self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob)
+                    if self.dual_aware_drift_mode != "none":
+                        approx_kls.append(approx_kl)
 
                 # Actor component at the current local point.
                 self.policy.optimizer.zero_grad(set_to_none=True)
@@ -1173,6 +1329,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     gradient_differences[name] = gradient_difference
                     corrected_actor_gradients[name] = corrected
 
+                if self.dual_aware_drift_mode != "none":
+                    cosine = self._named_gradient_cosine(current_actor_gradients, reference_actor_gradients)
+                    if np.isfinite(cosine):
+                        gradient_cosines.append(cosine)
+
                 momentum_state = {
                     name: gradient.detach().clone()
                     for name, gradient in corrected_actor_gradients.items()
@@ -1190,9 +1351,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 num_batches += 1
 
                 if self.target_kl is not None:
-                    with th.no_grad():
-                        log_ratio = log_prob - rollout_data.old_log_prob
-                        approx_kl = th.mean((th.exp(log_ratio) - 1.0) - log_ratio).cpu().item()
+                    assert approx_kl is not None
                     if approx_kl > 1.5 * self.target_kl:
                         continue_training = False
                         break
@@ -1212,6 +1371,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_reference_actor_grad_norm = float(np.mean(reference_norms)) if reference_norms else 0.0
         self._ampo_last_gradient_difference_norm = float(np.mean(difference_norms)) if difference_norms else 0.0
         self._ampo_last_corrected_actor_grad_norm = float(np.mean(corrected_norms)) if corrected_norms else 0.0
+        if approx_kls:
+            self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
+            self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
+        if gradient_cosines:
+            self._ampo_last_gradient_cosine_mean = float(np.mean(gradient_cosines))
+            self._ampo_last_gradient_cosine_min = float(np.min(gradient_cosines))
 
     def _update_local_actor_and_critic(
         self,
@@ -1222,6 +1387,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_reference_actor_grad_norm = 0.0
         self._ampo_last_gradient_difference_norm = 0.0
         self._ampo_last_corrected_actor_grad_norm = 0.0
+        self._ampo_last_local_actor_kl_mean = float("nan")
+        self._ampo_last_local_actor_kl_max = float("nan")
+        self._ampo_last_gradient_cosine_mean = float("nan")
+        self._ampo_last_gradient_cosine_min = float("nan")
 
         if self.local_actor_update_mode == "momentum":
             self._update_local_actor_and_critic_momentum(global_actor_state)
@@ -1302,6 +1471,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_completed_episode_mean": self._ampo_last_completed_episode_mean,
             "local_actor_update_mode": self.local_actor_update_mode,
             "momentum_beta": float(self.momentum_beta),
+            "dual_aware_drift_mode": self.dual_aware_drift_mode,
+            "dual_aware_kl_target": float(self.dual_aware_kl_target),
+            "dual_aware_correction_strength": float(self.dual_aware_correction_strength),
+            "dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
+            "local_actor_kl_mean": float(self._ampo_last_local_actor_kl_mean),
+            "local_actor_kl_max": float(self._ampo_last_local_actor_kl_max),
+            "gradient_cosine_mean": float(self._ampo_last_gradient_cosine_mean),
+            "gradient_cosine_min": float(self._ampo_last_gradient_cosine_min),
             "current_actor_grad_norm": float(self._ampo_last_current_actor_grad_norm),
             "reference_actor_grad_norm": float(self._ampo_last_reference_actor_grad_norm),
             "gradient_difference_norm": float(self._ampo_last_gradient_difference_norm),
@@ -1319,7 +1496,6 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             payload["critic_delta"] = self._clone_modules(self._ampo_last_critic_delta)
         return payload
 
-    @classmethod
     @classmethod
     def aggregate_uploads(
         cls,
@@ -1374,6 +1550,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(f"Mixed local_actor_update_mode values are not supported: {actor_update_modes}.")
         local_actor_update_mode = next(iter(actor_update_modes))
 
+        dual_aware_modes = {
+            cls._normalize_dual_aware_drift_mode(str(upload.get("dual_aware_drift_mode", "none")))
+            for upload in uploads
+        }
+        if len(dual_aware_modes) != 1:
+            raise ValueError(f"Mixed dual_aware_drift_mode values are not supported: {dual_aware_modes}.")
+        dual_aware_drift_mode = next(iter(dual_aware_modes))
+
         momentum_betas = np.asarray(
             [float(upload.get("momentum_beta", 0.9)) for upload in uploads],
             dtype=np.float64,
@@ -1392,6 +1576,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         dual_warmup_min_episodes = int(_shared_value("dual_warmup_min_episodes", 1))
         dual_scale_ema_beta = float(_shared_value("dual_scale_ema_beta", 0.95))
         dual_scale_epsilon = float(_shared_value("dual_scale_epsilon", 1e-8))
+        dual_aware_kl_target = float(_shared_value("dual_aware_kl_target", 0.02))
+        dual_aware_correction_strength = float(_shared_value("dual_aware_correction_strength", 1.0))
+        dual_aware_min_delta_scale = float(_shared_value("dual_aware_min_delta_scale", 0.5))
 
         payload: FederatedPayload = {
             "client_actor_deltas": [upload["actor_delta"] for upload in uploads],
@@ -1430,6 +1617,26 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             ),
             "local_actor_update_mode": local_actor_update_mode,
             "momentum_beta": float(momentum_betas[0]),
+            "dual_aware_drift_mode": dual_aware_drift_mode,
+            "dual_aware_kl_target": dual_aware_kl_target,
+            "dual_aware_correction_strength": dual_aware_correction_strength,
+            "dual_aware_min_delta_scale": dual_aware_min_delta_scale,
+            "client_local_actor_kl_means": np.asarray(
+                [float(upload.get("local_actor_kl_mean", np.nan)) for upload in uploads],
+                dtype=np.float64,
+            ),
+            "client_local_actor_kl_maxes": np.asarray(
+                [float(upload.get("local_actor_kl_max", np.nan)) for upload in uploads],
+                dtype=np.float64,
+            ),
+            "client_gradient_cosine_means": np.asarray(
+                [float(upload.get("gradient_cosine_mean", np.nan)) for upload in uploads],
+                dtype=np.float64,
+            ),
+            "client_gradient_cosine_mins": np.asarray(
+                [float(upload.get("gradient_cosine_min", np.nan)) for upload in uploads],
+                dtype=np.float64,
+            ),
             "client_current_actor_grad_norms": np.asarray(
                 [float(upload.get("current_actor_grad_norm", 0.0)) for upload in uploads],
                 dtype=np.float64,
@@ -1501,6 +1708,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         payload_actor_update_mode = self._normalize_local_actor_update_mode(
             str(payload.get("local_actor_update_mode", "standard"))
         )
+        payload_dual_aware_mode = self._normalize_dual_aware_drift_mode(
+            str(payload.get("dual_aware_drift_mode", "none"))
+        )
         if payload_critic_mode != self.critic_sync_mode:
             raise ValueError(
                 f"Server critic_sync_mode={self.critic_sync_mode!r} does not match payload {payload_critic_mode!r}."
@@ -1527,11 +1737,24 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 f"Server local_actor_update_mode={self.local_actor_update_mode!r} does not match "
                 f"payload {payload_actor_update_mode!r}."
             )
+        if payload_dual_aware_mode != self.dual_aware_drift_mode:
+            raise ValueError(
+                f"Server dual_aware_drift_mode={self.dual_aware_drift_mode!r} does not match "
+                f"payload {payload_dual_aware_mode!r}."
+            )
         payload_momentum_beta = float(payload.get("momentum_beta", self.momentum_beta))
         if not np.isclose(payload_momentum_beta, self.momentum_beta):
             raise ValueError(
                 f"Server momentum_beta={self.momentum_beta} does not match payload {payload_momentum_beta}."
             )
+        for key, server_value in (
+            ("dual_aware_kl_target", self.dual_aware_kl_target),
+            ("dual_aware_correction_strength", self.dual_aware_correction_strength),
+            ("dual_aware_min_delta_scale", self.dual_aware_min_delta_scale),
+        ):
+            payload_value = float(payload.get(key, server_value))
+            if not np.isclose(payload_value, server_value):
+                raise ValueError(f"Server {key}={server_value} does not match payload {payload_value}.")
 
         client_actor_deltas: list[FederatedModules] = payload["client_actor_deltas"]
         client_returns = np.asarray(payload["client_returns"], dtype=np.float64)
@@ -1543,14 +1766,41 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         assert self.lambda_weights is not None
         lambda_before = self.lambda_weights.copy()
 
+        client_local_actor_kl_means = np.asarray(
+            payload.get("client_local_actor_kl_means", np.full(num_clients, np.nan)), dtype=np.float64
+        )
+        client_local_actor_kl_maxes = np.asarray(
+            payload.get("client_local_actor_kl_maxes", np.full(num_clients, np.nan)), dtype=np.float64
+        )
+        if client_local_actor_kl_means.shape != (num_clients,) or client_local_actor_kl_maxes.shape != (num_clients,):
+            raise ValueError(
+                "dual-aware KL metric shape mismatch: "
+                f"mean={client_local_actor_kl_means.shape}, max={client_local_actor_kl_maxes.shape}."
+            )
+        client_delta_scales, client_dual_importance, client_kl_drift_scores, client_dual_aware_risks = (
+            self._compute_dual_aware_delta_scales(lambda_before, client_local_actor_kl_maxes)
+        )
+
         actor_before = self._get_actor_state()
         module_name = self.federated_actor_module_name
         aggregated_delta: FederatedModules = {module_name: OrderedDict()}
         for key, value in actor_before[module_name].items():
             if th.is_floating_point(value):
                 delta = th.zeros_like(value)
-                for lambda_weight, client_delta in zip(self.lambda_weights, client_actor_deltas, strict=True):
-                    delta += client_delta[module_name][key].to(value.dtype) * float(lambda_weight)
+                if self.dual_aware_drift_mode == "kl_gate":
+                    for lambda_weight, client_scale, client_delta in zip(
+                        lambda_before, client_delta_scales, client_actor_deltas, strict=True
+                    ):
+                        delta += (
+                            client_delta[module_name][key].to(value.dtype)
+                            * float(lambda_weight)
+                            * float(client_scale)
+                        )
+                else:
+                    # Preserve the exact original aggregation when the optional
+                    # correction is disabled or diagnostic-only.
+                    for lambda_weight, client_delta in zip(lambda_before, client_actor_deltas, strict=True):
+                        delta += client_delta[module_name][key].to(value.dtype) * float(lambda_weight)
                 aggregated_delta[module_name][key] = delta
             else:
                 aggregated_delta[module_name][key] = th.zeros_like(value)
@@ -1673,6 +1923,18 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             client_corrected_actor_grad_norms=np.asarray(
                 payload.get("client_corrected_actor_grad_norms", []), dtype=np.float64
             ),
+            client_local_actor_kl_means=client_local_actor_kl_means,
+            client_local_actor_kl_maxes=client_local_actor_kl_maxes,
+            client_gradient_cosine_means=np.asarray(
+                payload.get("client_gradient_cosine_means", np.full(num_clients, np.nan)), dtype=np.float64
+            ),
+            client_gradient_cosine_mins=np.asarray(
+                payload.get("client_gradient_cosine_mins", np.full(num_clients, np.nan)), dtype=np.float64
+            ),
+            client_delta_scales=client_delta_scales,
+            client_dual_importance=client_dual_importance,
+            client_kl_drift_scores=client_kl_drift_scores,
+            client_dual_aware_risks=client_dual_aware_risks,
             client_completed_episodes=client_completed_episodes,
             client_completed_episodes_last_update=client_completed_episodes_last_update,
             warmup_ready=warmup_ready,
@@ -1718,6 +1980,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         client_reference_actor_grad_norms: np.ndarray,
         client_gradient_difference_norms: np.ndarray,
         client_corrected_actor_grad_norms: np.ndarray,
+        client_local_actor_kl_means: np.ndarray,
+        client_local_actor_kl_maxes: np.ndarray,
+        client_gradient_cosine_means: np.ndarray,
+        client_gradient_cosine_mins: np.ndarray,
+        client_delta_scales: np.ndarray,
+        client_dual_importance: np.ndarray,
+        client_kl_drift_scores: np.ndarray,
+        client_dual_aware_risks: np.ndarray,
         client_completed_episodes: np.ndarray,
         client_completed_episodes_last_update: np.ndarray,
         warmup_ready: bool,
@@ -1771,6 +2041,16 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "server/ampo/local_actor_update_standard": float(self.local_actor_update_mode == "standard"),
             "server/ampo/local_actor_update_momentum": float(self.local_actor_update_mode == "momentum"),
             "server/ampo/momentum_beta": float(self.momentum_beta),
+            "server/ampo/dual_aware_none": float(self.dual_aware_drift_mode == "none"),
+            "server/ampo/dual_aware_diagnostic": float(self.dual_aware_drift_mode == "diagnostic"),
+            "server/ampo/dual_aware_kl_gate": float(self.dual_aware_drift_mode == "kl_gate"),
+            "server/ampo/dual_aware_kl_target": float(self.dual_aware_kl_target),
+            "server/ampo/dual_aware_correction_strength": float(self.dual_aware_correction_strength),
+            "server/ampo/dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
+            "server/ampo/dual_aware_scale_mean": float(np.mean(client_delta_scales)),
+            "server/ampo/dual_aware_scale_min": float(np.min(client_delta_scales)),
+            "server/ampo/dual_aware_risk_mean": float(np.mean(client_dual_aware_risks)),
+            "server/ampo/dual_aware_risk_max": float(np.max(client_dual_aware_risks)),
             "server/ampo/lambda_entropy": self._simplex_entropy(lambda_after),
             "server/ampo/lambda_min": float(np.min(lambda_after)),
             "server/ampo/lambda_max": float(np.max(lambda_after)),
@@ -1787,12 +2067,46 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             metrics["server/ampo/gradient_difference_norm_mean"] = float(np.mean(client_gradient_difference_norms))
         if client_corrected_actor_grad_norms.size > 0:
             metrics["server/ampo/corrected_actor_grad_norm_mean"] = float(np.mean(client_corrected_actor_grad_norms))
+
+        def _finite_mean(values: np.ndarray) -> float | None:
+            finite_values = values[np.isfinite(values)]
+            if finite_values.size == 0:
+                return None
+            return float(np.mean(finite_values))
+
+        for metric_name, values in (
+            ("server/ampo/local_actor_kl_mean", client_local_actor_kl_means),
+            ("server/ampo/local_actor_kl_max_mean", client_local_actor_kl_maxes),
+            ("server/ampo/gradient_cosine_mean", client_gradient_cosine_means),
+            ("server/ampo/gradient_cosine_min_mean", client_gradient_cosine_mins),
+        ):
+            finite_value = _finite_mean(values)
+            if finite_value is not None:
+                metrics[metric_name] = finite_value
+
         for client_idx, (client_return, lambda_weight, delta_norm) in enumerate(
             zip(client_returns, lambda_after, client_delta_norms, strict=True)
         ):
             metrics[f"server/ampo/client_{client_idx}/return"] = float(client_return)
             metrics[f"server/ampo/client_{client_idx}/lambda"] = float(lambda_weight)
             metrics[f"server/ampo/client_{client_idx}/delta_norm"] = float(delta_norm)
+            metrics[f"server/ampo/client_{client_idx}/lambda_actor"] = float(lambda_before[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/dual_aware_scale"] = float(client_delta_scales[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/dual_importance"] = float(client_dual_importance[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/kl_drift_score"] = float(client_kl_drift_scores[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/dual_aware_risk"] = float(client_dual_aware_risks[client_idx])
+            if np.isfinite(client_local_actor_kl_means[client_idx]):
+                metrics[f"server/ampo/client_{client_idx}/local_actor_kl_mean"] = float(
+                    client_local_actor_kl_means[client_idx]
+                )
+            if np.isfinite(client_local_actor_kl_maxes[client_idx]):
+                metrics[f"server/ampo/client_{client_idx}/local_actor_kl_max"] = float(
+                    client_local_actor_kl_maxes[client_idx]
+                )
+            if np.isfinite(client_gradient_cosine_means[client_idx]):
+                metrics[f"server/ampo/client_{client_idx}/gradient_cosine_mean"] = float(
+                    client_gradient_cosine_means[client_idx]
+                )
             metrics[f"server/ampo/client_{client_idx}/completed_episodes"] = float(
                 client_completed_episodes[client_idx]
             )
@@ -1817,6 +2131,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_scale_mode": self.dual_scale_mode,
             "local_actor_update_mode": self.local_actor_update_mode,
             "momentum_beta": float(self.momentum_beta),
+            "dual_aware_drift_mode": self.dual_aware_drift_mode,
+            "dual_aware_kl_target": float(self.dual_aware_kl_target),
+            "dual_aware_correction_strength": float(self.dual_aware_correction_strength),
+            "dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
             "vecnormalize": self._get_filtered_vecnormalize_state(),
         }
         if self._uses_global_critic():

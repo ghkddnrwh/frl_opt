@@ -1,18 +1,17 @@
-# export_wandb_runs_2026_08_24_complete_4groups.py
+# export_wandb_runs_2026_08_29_hardcoded.py
 #
-# 4 experiment groups, 100 unique W&B runs:
-#   Ant + friction      : 35
-#   Ant + gravity       : 35
-#   Walker2d + gravity  : 15
-#   Walker2d + friction : 15
+# 2026-08-29에 제공된 4개 W&B CSV의 run ID를 직접 하드코딩한 exporter.
+# 실행 시 CSV 파일은 필요하지 않습니다.
 #
-# The duplicate Ant+gravity CSV is intentionally excluded.
-# CSV files are not needed at runtime; run IDs are hardcoded below.
+# CSV rows (중복 포함): 60
+# Unique run IDs: 60
+# Duplicate occurrences: 0
+# CSV state counts: {'finished': 60}
 #
 # Usage:
 #   pip install wandb
 #   wandb login
-#   python export_wandb_runs_2026_08_24_complete_4groups.py
+#   python export_wandb_runs_2026_08_29_hardcoded.py
 
 import json
 import math
@@ -23,125 +22,83 @@ import wandb
 
 ENTITY = "ukjo19"
 PROJECT = "sb3"
-OUT_ROOT = "logs/wandb_logs_2026_08_24_complete_4groups"
+OUT_ROOT = "logs/wandb_logs_2026_08_29"
 PAGE_SIZE = 500
-ONLY_FINISHED = True
 
-GROUP_METADATA = {
-    "ant_friction": {"source_csv": "wandb_export_2026-08-24T00_06_01.484+09_00.csv", "env": ['PerturbAnt-v4'], "perturbation": ['friction'], "count": 35, "states": {'finished': 35}},
-    "ant_gravity": {"source_csv": "wandb_export_2026-08-24T00_06_20.716+09_00.csv", "env": ['PerturbAnt-v4'], "perturbation": ['gravity'], "count": 35, "states": {'finished': 35}},
-    "walker2d_gravity": {"source_csv": "wandb_export_2026-08-24T00_06_33.215+09_00.csv", "env": ['PerturbWalker2d-v4'], "perturbation": ['gravity'], "count": 15, "states": {'finished': 15}},
-    "walker2d_friction": {"source_csv": "wandb_export_2026-08-24T00_12_55.021+09_00.csv", "env": ['PerturbWalker2d-v4'], "perturbation": ['friction'], "count": 15, "states": {'finished': 15}},
-}
+# True면 API 조회 시점에 finished인 run만 export
+# False면 CSV에 포함된 모든 run의 현재까지 로그를 export
+ONLY_FINISHED = False
+
+SOURCE_FILE_METADATA = {'wandb_export_2026-08-29T00_47_32.419+09_00.csv': {'group': 'walker2d_friction', 'env': 'PerturbWalker2d-v4', 'perturbation': 'friction', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_01.097+09_00.csv': {'group': 'walker2d_gravity', 'env': 'PerturbWalker2d-v4', 'perturbation': 'gravity', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_12.661+09_00.csv': {'group': 'ant_gravity', 'env': 'PerturbAnt-v4', 'perturbation': 'gravity', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}, 'wandb_export_2026-08-29T00_48_39.776+09_00.csv': {'group': 'ant_friction', 'env': 'PerturbAnt-v4', 'perturbation': 'friction', 'rows': 15, 'run_ids': 15, 'state_counts': {'finished': 15}}}
 
 RUN_IDS_BY_GROUP = {
-    "ant_friction": [
-        "m49c7ag2",
-        "8xvs0mrg",
-        "4sknnqj9",
-        "0eq45zpc",
-        "0x9wuc1u",
-        "m86azz8r",
-        "teem7l7c",
-        "659mx9vi",
-        "ct1lkfu1",
-        "uvfhldbg",
-        "5sk8zlks",
-        "u67n9c88",
-        "363b0zgv",
-        "kvk6xhfb",
-        "eatii1by",
-        "amyo6peh",
-        "d4d03150",
-        "mjfth54l",
-        "raqdcayd",
-        "4ew5fejc",
-        "62dlvguj",
-        "o5resmb6",
-        "js1nth7z",
-        "ekyrewb2",
-        "xgo2tyfm",
-        "wej3irel",
-        "32zny8nn",
-        "053ckiqq",
-        "dsnspggw",
-        "eroqqast",
-        "9n5x8ih7",
-        "7lr0est2",
-        "08q204s5",
-        "10pl01ao",
-        "ijyohmzp",
-    ],
-    "ant_gravity": [
-        "j090ufki",
-        "8k0qrrj5",
-        "c5rjjbpx",
-        "7l7956xn",
-        "cuywj0js",
-        "dpq213x7",
-        "vagr0o1q",
-        "z6jz5map",
-        "at0jk2ve",
-        "53kkgurk",
-        "jwvvjhal",
-        "n3dxns16",
-        "pkav0p5o",
-        "ylvda79k",
-        "u6hge6bw",
-        "3b4hcbzu",
-        "mcfxlxbm",
-        "mtvcsajj",
-        "87xavuk5",
-        "weew8pn6",
-        "b9izgrur",
-        "8o6ngzi9",
-        "uvaqznbu",
-        "rzvwnl0d",
-        "cj2iqmwb",
-        "1y2frlb7",
-        "h2mhzqrc",
-        "3oxacb9p",
-        "9snsffek",
-        "w2u2p5xb",
-        "pbhakfn0",
-        "r5w02zk7",
-        "fsauv9z9",
-        "adwfq6jf",
-        "cih38gzn",
+    "walker2d_friction": [
+        "czlb5dfx",
+        "gr4300xn",
+        "nmfi04zj",
+        "ggxoz6i4",
+        "jy7pdwos",
+        "qu3hhxrv",
+        "mu8zj1hn",
+        "a9n2pw98",
+        "ea3ysx9v",
+        "i7uhz91e",
+        "plu47ae0",
+        "qb2z6kkg",
+        "drs1u2pf",
+        "m7kxy24p",
+        "ua7dzmw2",
     ],
     "walker2d_gravity": [
-        "oyn511sj",
-        "d8684h9e",
-        "m68ruxw6",
-        "kn5mroxl",
-        "z459p4f8",
-        "we3b9ti4",
-        "u015w1uu",
-        "7xxbfoa1",
-        "6suttm0h",
-        "uwdk7j81",
-        "52vf1jze",
-        "26xl01hp",
-        "dbv34ot3",
-        "lwgppgub",
-        "tfmseudm",
+        "hzq1vbci",
+        "j7aucfvp",
+        "gi0z952g",
+        "z18zcs3b",
+        "18akd1u5",
+        "t8s1u8gx",
+        "t3pmgyr6",
+        "4d4mqtto",
+        "5on8sz8s",
+        "yxasza2r",
+        "bl2oe8r5",
+        "xt7qmb9q",
+        "6yzej2ma",
+        "8nf8k7a2",
+        "he5whigu",
     ],
-    "walker2d_friction": [
-        "0z30cepz",
-        "axrfb5ec",
-        "o8vvco4o",
-        "t3hik7ut",
-        "50j0ubb3",
-        "4bb24zsz",
-        "k93cmvqg",
-        "f6jyr0tu",
-        "rc860tns",
-        "rul0agim",
-        "x5l4zhc1",
-        "b8bqw6im",
-        "zp3qw0bz",
-        "ru1z3kx3",
-        "wrbsmjhl",
+    "ant_gravity": [
+        "tp8d3fri",
+        "q1g12tpi",
+        "6xgq043i",
+        "jkzvlg1c",
+        "swkqm16n",
+        "x9ss54qp",
+        "hpgn6wiw",
+        "c2x8bsek",
+        "92p5z384",
+        "3jbw8q3z",
+        "k8a3hto6",
+        "h2umm1e6",
+        "ma7r91yc",
+        "y35f7iqv",
+        "67dgz2sk",
+    ],
+    "ant_friction": [
+        "ypj4x0nk",
+        "jdlkl4n9",
+        "858fctnm",
+        "k2f7owqv",
+        "f6hf7w0d",
+        "yrex3tvb",
+        "sr4l911o",
+        "9qi5bxd8",
+        "ujji7kb6",
+        "u13fqmfv",
+        "713avxqk",
+        "n0u98ysw",
+        "s97rbudy",
+        "4jq76n2p",
+        "k1xfqmqt",
     ],
 }
 
@@ -150,8 +107,6 @@ RUN_IDS = list(dict.fromkeys(
     for ids in RUN_IDS_BY_GROUP.values()
     for run_id in ids
 ))
-
-assert len(RUN_IDS) == 100, f"Expected 100 unique run IDs, got {len(RUN_IDS)}"
 
 
 def json_safe(x):
@@ -227,7 +182,6 @@ def export_run(run, out_root: Path):
 
     metadata = {
         "experiment_group": group,
-        "group_metadata": GROUP_METADATA.get(group),
         "api_path": api_path,
         "entity": getattr(run, "entity", None),
         "project": getattr(run, "project", None),
@@ -311,7 +265,7 @@ def main():
     out_root = Path(OUT_ROOT)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    print("[INFO] 4 groups / 100 unique runs")
+    print(f"[INFO] unique runs: {len(RUN_IDS)}")
     for group, ids in RUN_IDS_BY_GROUP.items():
         print(f"  - {group}: {len(ids)}")
     print()
@@ -323,7 +277,7 @@ def main():
     for i, run_id in enumerate(RUN_IDS, start=1):
         group = group_for_run(run_id)
         api_path = f"{ENTITY}/{PROJECT}/{run_id}"
-        print(f"[{i:03d}/100] {group} / {run_id}")
+        print(f"[{i:03d}/{len(RUN_IDS):03d}] {group} / {run_id}")
 
         try:
             run = api.run(api_path)
@@ -347,29 +301,25 @@ def main():
                 "error": str(e),
             })
 
-    expected_by_group = {g: len(ids) for g, ids in RUN_IDS_BY_GROUP.items()}
-    exported_by_group = {
-        g: sum(1 for x in exported if x["group"] == g)
-        for g in RUN_IDS_BY_GROUP
-    }
-
     dump_json(out_root / "_run_ids_by_group.json", RUN_IDS_BY_GROUP)
+    dump_json(out_root / "_source_file_metadata.json", SOURCE_FILE_METADATA)
     dump_json(out_root / "_export_summary.json", {
         "entity": ENTITY,
         "project": PROJECT,
-        "expected_total": 100,
-        "expected_by_group": expected_by_group,
-        "exported_total": len(exported),
-        "exported_by_group": exported_by_group,
-        "skipped_total": len(skipped),
-        "error_total": len(errors),
+        "unique_run_count": len(RUN_IDS),
+        "only_finished": ONLY_FINISHED,
+        "expected_by_group": {g: len(ids) for g, ids in RUN_IDS_BY_GROUP.items()},
+        "exported_count": len(exported),
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "exported": exported,
         "skipped": skipped,
         "errors": errors,
     })
 
     print()
     print("=" * 72)
-    print(f"Expected : 100")
+    print(f"Expected : {len(RUN_IDS)}")
     print(f"Exported : {len(exported)}")
     print(f"Skipped  : {len(skipped)}")
     print(f"Errors   : {len(errors)}")
