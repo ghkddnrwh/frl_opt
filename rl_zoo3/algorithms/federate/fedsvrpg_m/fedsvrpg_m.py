@@ -39,8 +39,12 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     FedSVRPG-M paper-style update: it reconstructs ``u_{r+1}`` by dividing the
     averaged displacement by ``local_lr * num_local_updates`` and then applies
     ``server_update_weight`` as lambda.  Therefore
-    ``server_update_weight = local_lr * K`` recovers actor-only PPOAvg-style
-    parameter averaging for beta=1.
+    ``server_update_weight = local_lr * K`` recovers PPOAvg-style actor
+    parameter averaging for beta=1.  Critic synchronization is configurable
+    through ``critic_sync_mode``: ``"local"`` preserves the original
+    FedSVRPG-M behavior, while ``"fedavg"`` averages the critic/non-actor
+    policy state across clients and clears the full PPO optimizer state after
+    each global synchronization, matching PPOAvg's optimizer-reset convention.
 
     For ``momentum_beta < 1.0``, the local PPO actor displacement is blended
     with a FedSVRPG-M-style correction displacement.  The correction uses the
@@ -86,8 +90,10 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     rollout gradient directions from each client.  The actor parameters are not
     mutated while estimating the current and previous directions; the real
     local actor update is applied once through u_{r,k}.  The critic/value branch
-    remains client-local.  During each local rollout update, the actor gradient
-    uses the rollout advantages computed at collection time, matching PPO's
+    remains client-local when ``critic_sync_mode="local"`` and is federated by
+    parameter averaging when ``critic_sync_mode="fedavg"``.  During each local
+    rollout update, the actor gradient uses the rollout advantages computed at
+    collection time, matching PPO's
     fixed-advantage convention; the critic is updated afterward on the same
     rollout buffer without refreshing actor advantages.
     """
@@ -117,10 +123,9 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         "fedsvrpg_gradient_type",
         "fedsvrpg_local_update_mode",
         "vecnormalize_sync_mode",
-        # Accepted for backward compatibility with older configs.  This PPO
-        # version keeps the critic local, so these do not change synchronization.
         "critic_sync_mode",
     )
+    valid_critic_sync_modes: tuple[str, ...] = ("local", "fedavg")
     valid_vecnormalize_sync_modes: tuple[str, ...] = ("none", "obs", "reward", "obs_reward")
     valid_actor_gradient_modes: tuple[str, ...] = ("mean", "cumulative")
     valid_fedsvrpg_gradient_types: tuple[str, ...] = ("ppo_clip", "score")
@@ -132,6 +137,9 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     _last_global_vecnormalize_state: VecNormalizeState | None = None
 
     def __init__(self, *args, **kwargs):
+        self.critic_sync_mode = self._normalize_critic_sync_mode(
+            kwargs.pop("critic_sync_mode", "local")
+        )
         self.vecnormalize_sync_mode = self._normalize_vecnormalize_sync_mode(
             kwargs.pop("vecnormalize_sync_mode", "obs_reward")
         )
@@ -212,6 +220,36 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             super()._update_current_progress_remaining(num_timesteps, total_timesteps)
             return
         self._current_progress_remaining = self._federated_progress_lock
+
+    @classmethod
+    def _normalize_critic_sync_mode(cls, mode: str) -> str:
+        """Normalize critic synchronization mode aliases.
+
+        Modes:
+          - local: keep critic/value state client-local (original FedSVRPG-M behavior).
+          - fedavg: average critic/non-actor policy state across clients every round.
+        """
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "none": "local",
+            "no_sync": "local",
+            "local_only": "local",
+            "client_local": "local",
+            "private": "local",
+            "avg": "fedavg",
+            "average": "fedavg",
+            "global": "fedavg",
+            "server": "fedavg",
+            "sync": "fedavg",
+            "synchronized": "fedavg",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_critic_sync_modes:
+            raise ValueError(
+                f"Unsupported critic_sync_mode={mode!r}. "
+                f"Choose one of {cls.valid_critic_sync_modes}."
+            )
+        return normalized
 
     @classmethod
     def _normalize_vecnormalize_sync_mode(cls, mode: str) -> str:
@@ -702,6 +740,47 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             current_state[key] = incoming_state[key].to(self.device)
         self.policy.load_state_dict(current_state, strict=True)
 
+    def _critic_state_keys(self) -> tuple[str, ...]:
+        """Return policy state entries not already carried by the actor payload.
+
+        For standard SB3 ActorCriticPolicy this corresponds to the value/critic
+        branch.  Defining it as the complement of actor keys makes
+        ``actor_state + critic_state`` cover the full policy state_dict, which is
+        what PPOAvg synchronizes in ``critic_sync_mode="fedavg"``.
+        """
+        state = self.policy.state_dict()
+        actor_keys = set(self._actor_state_keys())
+        return tuple(key for key in state.keys() if key not in actor_keys)
+
+    def _get_critic_state(self) -> FederatedModules:
+        policy_state = self.policy.state_dict()
+        critic_keys = self._critic_state_keys()
+        return {
+            self.federated_critic_module_name: OrderedDict(
+                (key, policy_state[key].detach().cpu().clone()) for key in critic_keys
+            )
+        }
+
+    def _set_critic_state(self, modules: FederatedModules) -> None:
+        module_name = self.federated_critic_module_name
+        if module_name not in modules:
+            raise KeyError(f"Missing {module_name!r} in federated critic payload.")
+
+        current_state = self.policy.state_dict()
+        incoming_state = modules[module_name]
+        expected_keys = set(self._critic_state_keys())
+        incoming_keys = set(incoming_state.keys())
+        missing = expected_keys - incoming_keys
+        if missing:
+            raise KeyError(f"Critic payload is missing keys: {sorted(missing)}")
+        unexpected = incoming_keys - expected_keys
+        if unexpected:
+            raise KeyError(f"Critic payload contains unexpected keys: {sorted(unexpected)}")
+
+        for key in expected_keys:
+            current_state[key] = incoming_state[key].to(self.device)
+        self.policy.load_state_dict(current_state, strict=True)
+
     def _zero_like_actor_state(self) -> FederatedModules:
         current = self._get_actor_state()
         return {
@@ -833,6 +912,20 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         for parameter in actor_params:
             self.policy.optimizer.state.pop(parameter, None)
         self.policy.optimizer.zero_grad(set_to_none=True)
+
+    def _reset_optimizer_state_after_global_sync(self) -> None:
+        """Reset optimizer state consistently with the selected sync mode.
+
+        ``local`` preserves the original FedSVRPG-M behavior and drops only
+        actor Adam moments.  ``fedavg`` replaces critic parameters too, so the
+        full optimizer state is stale; PPOAvg clears ``policy.optimizer.state``
+        after global synchronization, and we mirror that behavior here.
+        """
+        if self.critic_sync_mode == "fedavg":
+            self.policy.optimizer.state.clear()
+            self.policy.optimizer.zero_grad(set_to_none=True)
+            return
+        self._reset_actor_optimizer_state()
 
     # ------------------------------------------------------------------
     # Rollout / PPO utility helpers
@@ -1647,9 +1740,12 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             self._federated_progress_lock = None
 
     def get_upload_payload(self) -> FederatedPayload:
+        critic_state = self._get_critic_state() if self.critic_sync_mode == "fedavg" else None
         return {
             "round_start_actor_state": self._clone_modules(self._fedsvrpg_round_start_actor_state),
             "actor_delta": self._clone_modules(self._fedsvrpg_last_actor_delta),
+            "critic_state": self._clone_modules(critic_state) if critic_state is not None else None,
+            "critic_sync_mode": self.critic_sync_mode,
             "vecnormalize": self._get_filtered_vecnormalize_state(),
             "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
             "return": float(self._fedsvrpg_last_return),
@@ -1669,6 +1765,16 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     ) -> FederatedPayload:
         if len(uploads) == 0:
             raise ValueError("At least one upload is required for federated aggregation.")
+
+        critic_modes = {
+            cls._normalize_critic_sync_mode(str(upload.get("critic_sync_mode", "local")))
+            for upload in uploads
+        }
+        if len(critic_modes) != 1:
+            raise ValueError(
+                f"Mixed critic_sync_mode values are not supported in one aggregation: {critic_modes}"
+            )
+        critic_sync_mode = next(iter(critic_modes))
 
         vecnormalize_modes = {
             cls._normalize_vecnormalize_sync_mode(str(upload.get("vecnormalize_sync_mode", "obs_reward")))
@@ -1691,6 +1797,17 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
 
         actor_deltas = [upload["actor_delta"] for upload in uploads]
         aggregated_actor_delta = cls.average_module_states(actor_deltas, weights=weights)
+
+        aggregated_critic_state = None
+        if critic_sync_mode == "fedavg":
+            critic_states = [upload.get("critic_state") for upload in uploads]
+            if any(state is None for state in critic_states):
+                raise ValueError("critic_sync_mode='fedavg' requires critic_state from every client upload.")
+            aggregated_critic_state = cls.average_module_states(
+                critic_states,  # type: ignore[arg-type]
+                weights=weights,
+            )
+
         normalized_weights = cls.normalize_weights(len(uploads), weights)
         if vecnormalize_sync_mode == "none":
             aggregated_vecnormalize = None
@@ -1716,6 +1833,8 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             "reference_actor_state": reference_actor_state,
             "aggregated_actor_delta": aggregated_actor_delta,
             "server_direction": server_direction,
+            "critic_state": aggregated_critic_state,
+            "critic_sync_mode": critic_sync_mode,
             "fedsvrpg_local_update_mode": fedsvrpg_local_update_mode,
             "vecnormalize": aggregated_vecnormalize,
             "vecnormalize_sync_mode": vecnormalize_sync_mode,
@@ -1727,6 +1846,15 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
     def apply_global_payload(self, payload: FederatedPayload, mix_weight: float = 1.0) -> None:
         if not (float(mix_weight) > 0.0):
             raise ValueError("mix_weight must be positive.")
+
+        payload_critic_mode = self._normalize_critic_sync_mode(
+            str(payload.get("critic_sync_mode", self.critic_sync_mode))
+        )
+        if payload_critic_mode != self.critic_sync_mode:
+            raise ValueError(
+                f"Client critic_sync_mode={self.critic_sync_mode!r} does not match "
+                f"payload critic_sync_mode={payload_critic_mode!r}."
+            )
 
         payload_vecnormalize_mode = self._normalize_vecnormalize_sync_mode(
             str(payload.get("vecnormalize_sync_mode", self.vecnormalize_sync_mode))
@@ -1757,6 +1885,14 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             updated_actor = self._add_static_modules(reference_actor, server_step)
 
             self._set_actor_state(updated_actor)
+            if self.critic_sync_mode == "fedavg":
+                aggregated_critic_state = payload.get("critic_state")
+                if aggregated_critic_state is None:
+                    raise KeyError("Missing critic_state in FedSVRPG-M aggregation payload for critic_sync_mode='fedavg'.")
+                # Critic uses ordinary FedAvg parameter averaging.  It is not
+                # scaled by the FedSVRPG-M actor lambda/server_update_weight.
+                self._set_critic_state(aggregated_critic_state)
+
             self._fedsvrpg_prev_global_actor_state = self._clone_modules(reference_actor)
             self._fedsvrpg_server_direction = self._clone_modules(server_direction)
             self._fedsvrpg_round_start_actor_state = self._clone_modules(updated_actor)
@@ -1766,12 +1902,14 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             if self.vecnormalize_sync_mode != "none":
                 self._set_vecnormalize_state(payload.get("vecnormalize"))
                 self._reset_after_vecnormalize_sync()
-            self._reset_actor_optimizer_state()
+            self._reset_optimizer_state_after_global_sync()
             self._last_federated_metrics = {
                 "frl/fedsvrpg_server_direction_norm": self._actor_delta_norm(server_direction),
                 "frl/fedsvrpg_server_step_norm": self._actor_delta_norm(server_step),
                 "frl/fedsvrpg_local_update_mode_ppo": float(payload_update_mode == "ppo_update"),
                 "frl/fedsvrpg_local_update_mode_gradient": float(payload_update_mode == "gradient_update"),
+                "frl/fedsvrpg_critic_local": float(self.critic_sync_mode == "local"),
+                "frl/fedsvrpg_critic_fedavg": float(self.critic_sync_mode == "fedavg"),
                 "frl/fedsvrpg_lambda_over_eta_k": float(mix_weight) / max(float(payload.get("mean_local_update_scale", 1.0)), 1e-12),
                 "frl/fedsvrpg_mean_return": float(payload.get("return", 0.0)),
                 "frl/fedsvrpg_mean_local_update_scale": float(payload.get("mean_local_update_scale", 1.0)),
@@ -1788,6 +1926,14 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
             incoming_actor = self._mix_static_modules(self._get_actor_state(), incoming_actor, mix_weight)
         self._set_actor_state(incoming_actor)
 
+        if self.critic_sync_mode == "fedavg":
+            incoming_critic = payload.get("critic_state")
+            if incoming_critic is None:
+                raise KeyError("Missing critic_state in FedSVRPG-M broadcast payload for critic_sync_mode='fedavg'.")
+            # The server has already formed the global critic by ordinary
+            # parameter averaging; broadcast that state directly to clients.
+            self._set_critic_state(incoming_critic)
+
         previous_actor = payload.get("prev_actor_state", incoming_actor)
         server_direction = payload.get("server_direction", self._zero_like_actor_state())
         self._fedsvrpg_prev_global_actor_state = self._clone_modules(previous_actor)
@@ -1799,7 +1945,7 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         if self.vecnormalize_sync_mode != "none":
             self._set_vecnormalize_state(payload.get("vecnormalize"))
             self._reset_after_vecnormalize_sync()
-        self._reset_actor_optimizer_state()
+        self._reset_optimizer_state_after_global_sync()
 
     def get_broadcast_payload(self) -> FederatedPayload:
         actor_state = self._get_actor_state()
@@ -1809,11 +1955,14 @@ class FedSVRPGM(FederatedAlgorithmMixin, PPO):
         server_direction = self._fedsvrpg_server_direction
         if server_direction is None:
             server_direction = self._zero_like_actor_state()
+        critic_state = self._get_critic_state() if self.critic_sync_mode == "fedavg" else None
         return {
             "aggregation_type": "fedsvrpg_m_broadcast",
             "actor_state": self._clone_modules(actor_state),
             "prev_actor_state": self._clone_modules(previous_actor),
             "server_direction": self._clone_modules(server_direction),
+            "critic_state": self._clone_modules(critic_state) if critic_state is not None else None,
+            "critic_sync_mode": self.critic_sync_mode,
             "fedsvrpg_local_update_mode": self.fedsvrpg_local_update_mode,
             "vecnormalize": self._get_filtered_vecnormalize_state(),
             "vecnormalize_sync_mode": self.vecnormalize_sync_mode,
