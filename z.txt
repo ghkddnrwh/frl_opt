@@ -1,0 +1,8 @@
+(frl_opt) ukjoui-MacBookPro:frl_opt ukjo$ ps -ef | grep python | grep train.py | grep Ant-v4
+  kill 46031
+  kill 46365
+  kill 46452
+  kill 46471
+  kill 46483
+  kill 46497
+(frl_opt) ukjoui-MacBookPro:frl_opt ukjo$ 

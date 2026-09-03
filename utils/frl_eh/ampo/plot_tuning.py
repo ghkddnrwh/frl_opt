@@ -970,21 +970,25 @@ def main():
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.9"),
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
 
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
             ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
 
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
             
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
 
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/1.0"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/1.0"),
 
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.5"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.7"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/1.0"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.7"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/1.0"),
+
+            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
+            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.9/0.5"),
+            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
         ]
 
         # plot 저장 root
