@@ -5,7 +5,7 @@ import wandb
 ENTITY = "ukjo19"
 PROJECT = "sb3"
 
-DRY_RUN = True   # 먼저 True로 확인 → 문제 없으면 False
+DRY_RUN = False   # 먼저 True로 확인 → 문제 없으면 False
 
 api = wandb.Api()
 

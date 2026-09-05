@@ -149,6 +149,7 @@ PerturbAnt-v4:
   critic_sync_mode: local
   vecnormalize_sync_mode: obs_reward
   dual_return_source: raw
+  server_actor_delta_scale: 0.7
   # server_actor_lr: !!float 3e-3
   # actor_gradient_mode: cumulative
 
@@ -168,6 +169,7 @@ PerturbHalfCheetah-v4:
   critic_sync_mode: local
   vecnormalize_sync_mode: obs_reward
   dual_return_source: raw
+  server_actor_delta_scale: 0.7
   # server_actor_lr: !!float 1e-3
   # actor_gradient_mode: cumulative
 

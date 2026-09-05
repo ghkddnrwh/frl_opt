@@ -3,6 +3,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+# Publication-style plotting defaults
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman"],
+    "mathtext.fontset": "stix",
+    "font.size": 15,
+    "axes.labelsize": 15,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 12,
+    "axes.unicode_minus": False,
+})
+
+
 def read_scalar_from_npz(data, key, default=None):
     """
     evaluations.npz 안의 scalar 값을 안전하게 읽는다.
@@ -462,6 +476,8 @@ def collect_seed_curves(
         rounds_list=rounds_list,
     )
 
+    x = common_rounds.astype(float)
+
     freq_info = ", ".join(
         f"seed {seed}: {freq}" for seed, freq in zip(valid_seeds, logged_freqs)
     )
@@ -564,42 +580,25 @@ def make_unique_plot_label(
     algo_id_counts,
     used_plot_labels,
 ):
-    """
-    plot legend에 사용할 고유 label을 만든다.
+    """논문 그림용으로 알고리즘 legend label을 간결하게 만든다."""
 
-    같은 algo_id가 여러 번 등장하면 result_root_path의 마지막 폴더명을 붙인다.
-    예:
-        fedsp_pg_ppo_paper_aligned/0.0003
-        fedsp_pg_ppo_paper_aligned/0.001
-        fedsp_pg_ppo_paper_aligned/0.003
+    normalized_path = os.path.normpath(result_root_path).replace("\\", "/").lower()
 
-    그래도 label이 중복되면 path suffix를 점점 길게 붙인다.
-    """
+    if algo_id == "ppo_avg":
+        return "PPOAvg"
 
-    normalized_path = os.path.normpath(result_root_path)
-    path_parts = normalized_path.split(os.sep)
+    if algo_id == "fed_ampo_ppo":
+        if "/uniform" in normalized_path:
+            return "AMPO-PPO(U)"
+        if "/adaptive" in normalized_path:
+            return "AMPO-PPO(A)"
+        return "AMPO-PPO"
 
-    if algo_id_counts.get(algo_id, 0) > 1:
-        suffix_len = 1
-        path_suffix = "/".join(path_parts[-suffix_len:])
-        base_label = f"{algo_id}/{path_suffix}"
-    else:
-        suffix_len = 0
-        base_label = algo_id
+    if algo_id == "fed_svrpg_m":
+        return "FedSVRPG-M-PPO"
 
-    plot_label = base_label
-
-    while plot_label in used_plot_labels:
-        suffix_len += 1
-
-        if suffix_len <= len(path_parts):
-            path_suffix = "/".join(path_parts[-suffix_len:])
-            plot_label = f"{algo_id}/{path_suffix}"
-        else:
-            plot_label = f"{base_label} #{len(used_plot_labels) + 1}"
-            break
-
-    return plot_label
+    # 위 알고리즘 외에는 기존 algo_id를 그대로 사용한다.
+    return algo_id
 
 
 def normalize_window_size(window_size=None):
@@ -717,7 +716,7 @@ def plot_seed_average_curve(
     avg_curve = np.nanmean(plot_seed_curves, axis=0)
     std_curve = np.nanstd(plot_seed_curves, axis=0)
 
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(10, 6))
 
     if window_size > 1:
         line_label = f"seed average (window={window_size})"
@@ -741,19 +740,25 @@ def plot_seed_average_curve(
         label="± seed std",
     )
 
-    plt.xlabel("Timesteps")
+    # plt.xlabel("Timesteps")
+    plt.xlabel("Global Communication Rounds")
     plt.ylabel("Return")
-    plt.title(f"{algo_id} - {env_id} - {metric}")
     plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+    plt.legend(frameon=False)
+    # Reduce outer whitespace more aggressively for paper figures.
+    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
 
     save_file = os.path.join(
         save_dir,
         f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
-    plt.savefig(save_file, dpi=300)
+    plt.savefig(
+        save_file,
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
     plt.close()
 
     print(f"[Saved] {save_file}")
@@ -783,7 +788,7 @@ def plot_multiple_algos(
     window_size = normalize_window_size(window_size)
     window_suffix = make_window_suffix(window_size)
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(10, 6))
 
     for plot_label, x, seed_curves in algo_data_list:
         # window smoothing은 seed별 curve에 먼저 적용한다.
@@ -808,24 +813,39 @@ def plot_multiple_algos(
             alpha=0.15,
         )
 
-    plt.xlabel("Timesteps")
+    # plt.xlabel("Timesteps")
+    plt.xlabel("Global Communication Rounds")
     plt.ylabel("Return")
 
-    if window_size > 1:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric} - window={window_size}")
-    else:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric}")
-
     plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+
+    # 동일 알고리즘의 여러 하이퍼파라미터 곡선은 모두 유지하되,
+    # legend에는 같은 이름을 한 번만 표시한다.
+    handles, labels = plt.gca().get_legend_handles_labels()
+    unique_legend = {}
+    for handle, label in zip(handles, labels):
+        if label not in unique_legend:
+            unique_legend[label] = handle
+
+    plt.legend(
+        unique_legend.values(),
+        unique_legend.keys(),
+        frameon=False,
+    )
+    # Reduce outer whitespace more aggressively for paper figures.
+    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
 
     save_file = os.path.join(
         save_dir,
         f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
-    plt.savefig(save_file, dpi=300)
+    plt.savefig(
+        save_file,
+        dpi=300,
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
     plt.close()
 
     print(f"[Saved] {save_file}")
@@ -970,17 +990,8 @@ def main():
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.9"),
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
 
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
-
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
-
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.5"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.7"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/1.0"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
+            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
 
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
@@ -990,13 +1001,18 @@ def main():
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.7"),
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/1.0"),
 
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
             ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.9/0.5"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
+
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
+            
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco/fixed/noise_assignment/{env_id}/{perturbation_type}"
+        plot_root_path = f"plots/iclr2027_ampo/learning_curve/{env_id}/{perturbation_type}"
 
         # 추가 하위 폴더 인자 묶음
         #
