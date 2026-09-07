@@ -585,6 +585,17 @@ def make_unique_plot_label(
     normalized_path = os.path.normpath(result_root_path).replace("\\", "/").lower()
 
     if algo_id == "ppo_avg":
+        # ppo_avg 아래의 full_local 실험은 server communication/aggregation 없이
+        # local PPO만 수행하는 baseline이므로 일반 "PPO"로 표시한다.
+        # 아래처럼 중간에 normalize 폴더가 있어도 동일하게 처리된다.
+        #   .../ppo_avg/full_local
+        #   .../ppo_avg/normalize/full_local
+        is_full_local_ppo = (
+            "/ppo_avg/" in normalized_path
+            and normalized_path.endswith("/full_local")
+        )
+        if is_full_local_ppo:
+            return "PPO"
         return "PPOAvg"
 
     if algo_id == "fed_ampo_ppo":
@@ -990,8 +1001,13 @@ def main():
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.9"),
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
 
+            # PPO baseline (server communication 없음).
+            # 아래 두 full_local 경로는 모두 legend에서 "PPO"로 처리된다.
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/full_local"),
+            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize/full_local"),
+
             # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
 
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
@@ -1003,9 +1019,9 @@ def main():
 
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
             # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.9/0.5"),
-            ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
+            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
 
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
+            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
             
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
             ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
@@ -1015,7 +1031,7 @@ def main():
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/iclr2027_ampo/learning_curve/{env_id}/{perturbation_type}"
+        plot_root_path = f"plots/iclr2027_ampo/comparison_with_ppo/{perturbation_type}"
 
         # 추가 하위 폴더 인자 묶음
         #
@@ -1036,7 +1052,7 @@ def main():
         for extra_args in normalize_extra_arg_sets(extra_arg_sets):
             # 파일 이름 suffix
             suffix = make_extra_args_suffix(extra_args)
-            filename_prefix = f"comparison{suffix}"
+            filename_prefix = f"ppo_vs_ampo_ppo{suffix}"
 
             # 각 환경과 metric에 대해 모든 알고리즘을 비교 플롯
             for metric in metric_list:

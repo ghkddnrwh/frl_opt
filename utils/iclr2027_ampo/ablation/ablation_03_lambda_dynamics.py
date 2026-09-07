@@ -84,7 +84,7 @@ def plot_one(rounds, eval_seeds, lambda_seeds, noises, title, stem):
     axes[0].set_ylabel("Local evaluation return")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend(frameon=False, ncol=2)
-    axes[0].set_title(title)
+    # axes[0].set_title(title)
 
     axes[1].axhline(1.0 / k, linestyle="--", linewidth=1.5, label=r"Uniform $1/K$")
     axes[1].set_xlabel("Global Communication Rounds")
