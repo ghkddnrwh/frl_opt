@@ -395,18 +395,125 @@ def modify_xml(base_env, mode='gravity', value=0.0):
 
     Args:
         base_env (str): 환경 이름 ("ant", "half_cheetah", "hopper", "humanoid", "walker2d")
-        mode (str): 'gravity' 또는 'size'
-        value (float): 중력 z값 또는 크기 변화 비율 (예: 0.1 → 10% 증가)
+        mode (str): perturbation 종류. 'gravity_friction'이면 중력/마찰을 동시에 변경
+        value (float | dict): 일반 mode에서는 변화 비율.
+            mode='gravity_friction'에서는
+            {"gravity": gravity_ratio, "friction": friction_ratio} 형태 사용
+            (예: {"gravity": 0.2, "friction": -0.3} -> 중력 1.2배, 마찰 0.7배)
     """
     # 파일 경로 설정
     file_path = os.path.dirname(__file__)
     original_xml_path = os.path.join(os.path.dirname(gym.__file__), "envs", "mujoco", "assets", f"{base_env}.xml")
-    mode_str = f"{mode}_{value}".replace('.', '_')
+    # gravity + friction 동시 perturbation에서는 두 값을 독립적으로 받습니다.
+    # 예: value={"gravity": 0.2, "friction": -0.3}
+    #     -> gravity 1.2배, friction 0.7배
+    if mode == "gravity_friction":
+        if not isinstance(value, dict):
+            raise TypeError(
+                "For mode='gravity_friction', value must be a dict like "
+                "{'gravity': 0.2, 'friction': -0.3}."
+            )
+        if "gravity" not in value or "friction" not in value:
+            raise ValueError(
+                "For mode='gravity_friction', value must contain both "
+                "'gravity' and 'friction'."
+            )
+
+        gravity_value = float(value["gravity"])
+        friction_value = float(value["friction"])
+        mode_str = (
+            f"gravity_{gravity_value}_friction_{friction_value}"
+            .replace('.', '_')
+        )
+    else:
+        gravity_value = None
+        friction_value = None
+        mode_str = f"{mode}_{value}".replace('.', '_')
+
     perturb_xml_path = os.path.join(file_path, "assets", base_env, f"{base_env}_{mode_str}.xml")
 
     # XML 파싱
     tree = ET.parse(original_xml_path)
     root = tree.getroot()
+
+    def _apply_gravity(perturb_value):
+        """z축 gravity를 (1 + perturb_value) 배로 스케일링합니다."""
+        gravity_scale = 1 + perturb_value
+        option_tag = root.find(".//option")
+
+        if option_tag is None:
+            print("⚠️ No <option> tag found in the XML.")
+            return
+
+        original_gravity = option_tag.get("gravity")
+        if original_gravity is not None:
+            print(f"Original gravity: {original_gravity}")
+            try:
+                gx, gy, gz = map(float, original_gravity.strip().split())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Failed to parse gravity='{original_gravity}'"
+                ) from exc
+        else:
+            gx, gy, gz = 0.0, 0.0, -9.81
+
+        new_gz = gz * gravity_scale
+        option_tag.set("gravity", f"{gx:.8g} {gy:.8g} {new_gz:.8g}")
+        print(
+            f"[✓] gravity done: gz {gz:.8g} -> {new_gz:.8g} "
+            f"(factor={gravity_scale:.8g})"
+        )
+
+    def _apply_friction(perturb_value):
+        """모든 실제 worldbody geom의 effective friction을 동일 비율로 스케일링합니다."""
+        friction_scale = 1 + perturb_value
+        print(f"[*] Modifying ALL geom friction by factor {friction_scale}")
+
+        if friction_scale < 0:
+            raise ValueError(
+                f"Invalid friction scale factor: {friction_scale}. "
+                "value must be greater than or equal to -1.0"
+            )
+
+        try:
+            import mujoco
+        except ImportError as exc:
+            raise ImportError(
+                "This friction mode requires the `mujoco` package. "
+                "Install it or use a Gymnasium MuJoCo environment that depends on it."
+            ) from exc
+
+        # friction의 effective 기본값은 원본 모델에서 읽습니다.
+        # gravity 변경은 geom friction 자체에 영향을 주지 않으므로,
+        # gravity_friction 동시 모드에서도 원본 모델 기준으로 읽어도 안전합니다.
+        compiled_model = mujoco.MjModel.from_xml_path(original_xml_path)
+        actual_geoms = root.findall(".//worldbody//geom")
+
+        if len(actual_geoms) != compiled_model.ngeom:
+            raise RuntimeError(
+                f"Number of XML geoms ({len(actual_geoms)}) does not match "
+                f"compiled MuJoCo geoms ({compiled_model.ngeom}). "
+                "Cannot safely assign friction consistently."
+            )
+
+        changed = 0
+        for geom_id, geom in enumerate(actual_geoms):
+            name = geom.get("name", f"unnamed_geom_{geom_id}")
+            old_friction = compiled_model.geom_friction[geom_id].copy()
+            new_friction = old_friction * friction_scale
+
+            geom.set(
+                "friction",
+                " ".join(f"{x:.8g}" for x in new_friction)
+            )
+
+            print(
+                f"    {geom_id:02d} {name}: "
+                f"{old_friction} -> {new_friction}"
+            )
+            changed += 1
+
+        print(f"[✓] friction done. changed actual geoms: {changed}")
 
     # ANT 전용 limb 구성
     ANT_LIMBS = {
@@ -520,26 +627,20 @@ def modify_xml(base_env, mode='gravity', value=0.0):
         }
     }
 
-    scale_factor = 1 + value
+    # 기존 단일 perturbation mode에서는 기존 value semantics 유지
+    scale_factor = None if mode == "gravity_friction" else 1 + value
 
     if mode == 'gravity':
-        option_tag = root.find(".//option")
-        if option_tag is not None:
-            original_gravity = option_tag.get("gravity")
-            if original_gravity is not None:
-                print(f"Original gravity: {original_gravity}")
-                try:
-                    gx, gy, gz = map(float, original_gravity.strip().split())
-                    gz *= scale_factor  # z축만 스케일링
-                    new_gravity = f"{gx} {gy} {gz}"
-                    option_tag.set("gravity", new_gravity)
-                except ValueError:
-                    print("⚠️ gravity 값을 파싱하는 데 실패했습니다.")
-            else:
-                gz = -9.81 * scale_factor
-                option_tag.set("gravity", f"0 0 {gz}")
-        else:
-            print("⚠️ No <option> tag found in the XML.")
+        _apply_gravity(value)
+
+    elif mode == 'gravity_friction':
+        print(
+            "[*] Applying simultaneous gravity + friction perturbation: "
+            f"gravity factor={1 + gravity_value}, "
+            f"friction factor={1 + friction_value}"
+        )
+        _apply_gravity(gravity_value)
+        _apply_friction(friction_value)
 
     ##############################################################################################################
     ### Torso
@@ -672,59 +773,7 @@ def modify_xml(base_env, mode='gravity', value=0.0):
     ### Friction: scale effective friction of ALL actual geoms consistently
     ##############################################################################################################
     elif mode == "friction":
-        print(f"[*] Modifying ALL geom friction by factor {1 + value}")
-
-        scale_factor = 1 + value
-
-        if scale_factor < 0:
-            raise ValueError(
-                f"Invalid friction scale factor: {scale_factor}. "
-                "value must be greater than or equal to -1.0"
-            )
-
-        try:
-            import mujoco
-        except ImportError:
-            raise ImportError(
-                "This friction mode requires the `mujoco` package. "
-                "Install it or use a Gymnasium MuJoCo environment that depends on it."
-            )
-
-        # 1. 원본 XML을 MuJoCo로 compile해서 실제 effective friction을 얻음
-        compiled_model = mujoco.MjModel.from_xml_path(original_xml_path)
-
-        # 2. 실제 worldbody 안의 geom만 가져옴
-        #    <default><geom ...>은 실제 geom이 아니므로 제외해야 함
-        actual_geoms = root.findall(".//worldbody//geom")
-
-        if len(actual_geoms) != compiled_model.ngeom:
-            raise RuntimeError(
-                f"Number of XML geoms ({len(actual_geoms)}) does not match "
-                f"compiled MuJoCo geoms ({compiled_model.ngeom}). "
-                "Cannot safely assign friction consistently."
-            )
-
-        changed = 0
-
-        for geom_id, geom in enumerate(actual_geoms):
-            name = geom.get("name", f"unnamed_geom_{geom_id}")
-
-            old_friction = compiled_model.geom_friction[geom_id].copy()
-            new_friction = old_friction * scale_factor
-
-            geom.set(
-                "friction",
-                " ".join(f"{x:.8g}" for x in new_friction)
-            )
-
-            print(
-                f"    {geom_id:02d} {name}: "
-                f"{old_friction} -> {new_friction}"
-            )
-
-            changed += 1
-
-        print(f"[✓] friction done. changed actual geoms: {changed}")
+        _apply_friction(value)
 
 
     ##############################################################################################################
