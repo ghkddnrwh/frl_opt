@@ -397,30 +397,36 @@ def modify_xml(base_env, mode='gravity', value=0.0):
         base_env (str): 환경 이름 ("ant", "half_cheetah", "hopper", "humanoid", "walker2d")
         mode (str): perturbation 종류. 'gravity_friction'이면 중력/마찰을 동시에 변경
         value (float | dict): 일반 mode에서는 변화 비율.
-            mode='gravity_friction'에서는
-            {"gravity": gravity_ratio, "friction": friction_ratio} 형태 사용
-            (예: {"gravity": 0.2, "friction": -0.3} -> 중력 1.2배, 마찰 0.7배)
+            mode='gravity_friction'에서 float이면 같은 값을 중력/마찰에 동시에 적용.
+            예: -0.3 -> gravity 0.7배, friction 0.7배
+            dict이면 두 값을 독립적으로 적용 가능.
+            예: {"gravity": 0.2, "friction": -0.3} -> 중력 1.2배, 마찰 0.7배
     """
     # 파일 경로 설정
     file_path = os.path.dirname(__file__)
     original_xml_path = os.path.join(os.path.dirname(gym.__file__), "envs", "mujoco", "assets", f"{base_env}.xml")
-    # gravity + friction 동시 perturbation에서는 두 값을 독립적으로 받습니다.
-    # 예: value={"gravity": 0.2, "friction": -0.3}
-    #     -> gravity 1.2배, friction 0.7배
+    # gravity + friction 동시 perturbation
+    # 1) scalar 입력: 기존 federated pipeline과 호환
+    #    value=-0.3 -> gravity, friction 모두 0.7배
+    # 2) dict 입력: 두 perturbation을 독립적으로 지정
+    #    value={"gravity": 0.2, "friction": -0.3}
+    #    -> gravity 1.2배, friction 0.7배
     if mode == "gravity_friction":
-        if not isinstance(value, dict):
-            raise TypeError(
-                "For mode='gravity_friction', value must be a dict like "
-                "{'gravity': 0.2, 'friction': -0.3}."
-            )
-        if "gravity" not in value or "friction" not in value:
-            raise ValueError(
-                "For mode='gravity_friction', value must contain both "
-                "'gravity' and 'friction'."
-            )
+        if isinstance(value, dict):
+            if "gravity" not in value or "friction" not in value:
+                raise ValueError(
+                    "For mode='gravity_friction', dict value must contain both "
+                    "'gravity' and 'friction'."
+                )
+            gravity_value = float(value["gravity"])
+            friction_value = float(value["friction"])
+        else:
+            # 기존 호출 형태:
+            # noise_type='gravity_friction', noise=-0.3
+            # -> 동일한 -0.3을 gravity와 friction 양쪽에 적용
+            gravity_value = float(value)
+            friction_value = float(value)
 
-        gravity_value = float(value["gravity"])
-        friction_value = float(value["friction"])
         mode_str = (
             f"gravity_{gravity_value}_friction_{friction_value}"
             .replace('.', '_')

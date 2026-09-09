@@ -275,7 +275,7 @@ PerturbWalker2d-v4:
   n_timesteps: !!float 2e6
   num_clients: 5
   local_steps: 512
-  server_update_weight: 0.5
+  server_update_weight: 1.0
 
   n_envs: 1
   batch_size: 16
