@@ -1528,16 +1528,30 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             self._ampo_last_gradient_cosine_min = float(np.min(gradient_cosines))
 
     def _update_local_critic_and_actor_controlled(self) -> None:
+        """Run standard-style local PPO with a bounded number of actor Adam steps.
+
+        ``actor_updates_per_round=None`` continues to use
+        ``_update_local_actor_and_critic_standard()``, i.e. one joint PPO optimizer
+        step per minibatch. For an integer U, all PPO minibatches are still used
+        and the critic is still optimized on every minibatch, while actor
+        gradients are averaged within U consecutive groups and applied through
+        the same ``self.policy.optimizer.step()`` used by standard PPO.
+
+        Therefore U == total_batches reduces to the standard local-PPO update
+        (up to floating-point roundoff). Smaller U changes only the frequency of
+        actor optimizer steps; it does not use a manual parameter-addition actor
+        update and does not reuse ``server_actor_lr`` as the local actor LR.
+        """
         actor_params = self._actor_named_parameters()
         if not actor_params:
             raise RuntimeError("Could not identify actor parameters for controlled local actor updates.")
 
-        critic_params = self._critic_named_parameters()
-        module_name = self.federated_actor_module_name
+        actor_parameter_names = tuple(actor_params.keys())
         total_size = self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
         batch_size = self.batch_size or total_size
         batches_per_epoch = (total_size + batch_size - 1) // batch_size
         total_batches = int(self.n_epochs * batches_per_epoch)
+
         requested_updates = int(self.actor_updates_per_round or 0)
         if requested_updates <= 0:
             raise RuntimeError("Controlled actor update path requires actor_updates_per_round >= 1.")
@@ -1548,32 +1562,19 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             )
 
         self.policy.set_training_mode(True)
-        critic_learning_rate = float(self.lr_schedule(self._current_progress_remaining))
-        actor_step_lr = self._current_controlled_actor_lr()
-        self._set_optimizer_learning_rate(self.policy.optimizer, critic_learning_rate)
+        learning_rate = float(self.lr_schedule(self._current_progress_remaining))
+        self._set_optimizer_learning_rate(self.policy.optimizer, learning_rate)
 
-        accumulated_gradient = self._zero_like_actor_state()
+        accumulated_actor_gradients = {
+            name: th.zeros_like(parameter, memory_format=th.preserve_format)
+            for name, parameter in actor_params.items()
+        }
         group_batches = 0
         num_batches = 0
         updates_applied = 0
+        stopped_early = False
         approx_kls: list[float] = []
         actor_grad_norms: list[float] = []
-
-        def apply_accumulated_actor_update() -> None:
-            nonlocal accumulated_gradient, group_batches, updates_applied
-            if group_batches <= 0:
-                return
-            step_gradient = self._clone_modules(accumulated_gradient)
-            if self.actor_gradient_mode == "mean":
-                for module_state in step_gradient.values():
-                    for key in module_state.keys():
-                        module_state[key] /= float(group_batches)
-            actor_state = self._get_actor_state()
-            actor_updated = self._add_scaled_modules(actor_state, step_gradient, actor_step_lr)
-            self._copy_actor_parameters_without_optimizer_reset(actor_updated)
-            accumulated_gradient = self._zero_like_actor_state()
-            group_batches = 0
-            updates_applied += 1
 
         for _ in range(self.n_epochs):
             for rollout_data in self._iter_rollout_minibatches():
@@ -1581,59 +1582,117 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 if self.use_sde:
                     self.policy.reset_noise(self.batch_size)
 
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
-                actor_minimization_loss = self._ppo_actor_loss(log_prob, entropy, rollout_data)
-                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(values, rollout_data)
+                values, log_prob, entropy = self.policy.evaluate_actions(
+                    rollout_data.observations,
+                    actions,
+                )
+                actor_minimization_loss = self._ppo_actor_loss(
+                    log_prob,
+                    entropy,
+                    rollout_data,
+                )
+                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
+                    values,
+                    rollout_data,
+                )
 
+                approx_kl: float | None = None
                 if self.target_kl is not None or self.dual_aware_drift_mode != "none":
-                    approx_kls.append(self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob))
+                    approx_kl = self._approx_kl_from_log_prob(
+                        log_prob,
+                        rollout_data.old_log_prob,
+                    )
+                    if self.dual_aware_drift_mode != "none":
+                        approx_kls.append(approx_kl)
 
+                # Actor gradient from the same PPO loss used by the standard path.
                 self.policy.optimizer.zero_grad(set_to_none=True)
-                actor_minimization_loss.backward(retain_graph=bool(critic_params))
-                for name, parameter in self.policy.named_parameters():
-                    if name not in actor_params:
-                        parameter.grad = None
-                th.nn.utils.clip_grad_norm_(list(actor_params.values()), self.max_grad_norm)
+                actor_minimization_loss.backward(retain_graph=True)
+                batch_actor_gradients = self._capture_named_gradients(actor_parameter_names)
+                actor_grad_norms.append(self._named_gradient_norm(batch_actor_gradients))
+                for name in actor_parameter_names:
+                    accumulated_actor_gradients[name].add_(batch_actor_gradients[name])
+                group_batches += 1
 
-                batch_actor_gradients: dict[str, th.Tensor] = {}
-                for name, parameter in actor_params.items():
-                    if parameter.grad is not None:
-                        ascent_gradient = -parameter.grad.detach().cpu()
-                        batch_actor_gradients[name] = ascent_gradient
-                        if name in accumulated_gradient[module_name]:
-                            accumulated_gradient[module_name][name] += ascent_gradient
-                if batch_actor_gradients:
-                    actor_grad_norms.append(self._named_gradient_norm(batch_actor_gradients))
-
+                # Ordinary critic gradient on the same minibatch. Capture all
+                # touched parameters so shared feature-extractor contributions
+                # are preserved.
                 self.policy.optimizer.zero_grad(set_to_none=True)
-                if critic_params:
-                    critic_minimization_loss.backward()
-                    for name, parameter in self.policy.named_parameters():
-                        if name not in critic_params:
-                            parameter.grad = None
-                    th.nn.utils.clip_grad_norm_(list(critic_params.values()), self.max_grad_norm)
+                critic_minimization_loss.backward()
+                critic_gradients = self._capture_named_gradients()
+                self.policy.optimizer.zero_grad(set_to_none=True)
+
+                num_batches += 1
+                next_boundary = int(
+                    np.ceil((updates_applied + 1) * total_batches / requested_updates)
+                )
+                apply_actor_update = (
+                    updates_applied < requested_updates
+                    and num_batches >= next_boundary
+                )
+
+                if apply_actor_update:
+                    # Group averaging is the natural compressed counterpart of
+                    # standard minibatch PPO and avoids a group-size-dependent
+                    # actor step scale.
+                    mean_actor_gradients = {
+                        name: gradient / float(group_batches)
+                        for name, gradient in accumulated_actor_gradients.items()
+                    }
+                    self._set_optimizer_gradients(
+                        mean_actor_gradients,
+                        critic_gradients,
+                    )
+                    # Match the standard path: clip the actual joint gradient
+                    # immediately before Adam updates the parameters.
+                    th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()
                     self.policy.optimizer.zero_grad(set_to_none=True)
 
-                num_batches += 1
-                group_batches += 1
-                next_boundary = int(np.ceil((updates_applied + 1) * total_batches / requested_updates))
-                if num_batches >= next_boundary and updates_applied < requested_updates:
-                    apply_accumulated_actor_update()
+                    for gradient in accumulated_actor_gradients.values():
+                        gradient.zero_()
+                    group_batches = 0
+                    updates_applied += 1
+                else:
+                    # Actor is held fixed on this minibatch; critic keeps its
+                    # ordinary per-minibatch PPO optimizer update.
+                    for name, parameter in self.policy.named_parameters():
+                        critic_gradient = critic_gradients.get(name)
+                        parameter.grad = (
+                            None
+                            if critic_gradient is None
+                            else critic_gradient.to(
+                                device=parameter.device,
+                                dtype=parameter.dtype,
+                            ).clone()
+                        )
+                    th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.policy.optimizer.step()
+                    self.policy.optimizer.zero_grad(set_to_none=True)
+
+                if self.target_kl is not None:
+                    assert approx_kl is not None
+                    if approx_kl > 1.5 * self.target_kl:
+                        stopped_early = True
+                        break
+
+            if stopped_early:
+                break
 
         if num_batches == 0:
             raise RuntimeError("No rollout minibatches were available for controlled actor updates.")
-        if group_batches > 0 and updates_applied < requested_updates:
-            apply_accumulated_actor_update()
-        if updates_applied != requested_updates:
+
+        if not stopped_early and updates_applied != requested_updates:
             raise RuntimeError(
                 f"Expected {requested_updates} actor updates, applied {updates_applied}."
             )
 
         self._ampo_last_num_actor_batches = num_batches
         self._ampo_last_actor_updates_applied = updates_applied
-        self._ampo_last_actor_step_lr = actor_step_lr
-        self._ampo_last_current_actor_grad_norm = float(np.mean(actor_grad_norms)) if actor_grad_norms else 0.0
+        self._ampo_last_actor_step_lr = learning_rate
+        self._ampo_last_current_actor_grad_norm = (
+            float(np.mean(actor_grad_norms)) if actor_grad_norms else 0.0
+        )
         if approx_kls:
             self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
             self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
