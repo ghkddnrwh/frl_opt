@@ -191,6 +191,7 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     valid_dual_return_modes: tuple[str, ...] = ("discounted", "undiscounted")
     valid_dual_scale_modes: tuple[str, ...] = ("none", "std_ema")
     valid_local_actor_update_modes: tuple[str, ...] = ("standard", "momentum")
+    valid_actor_gradient_modes: tuple[str, ...] = ("mean", "cumulative")
     valid_dual_aware_drift_modes: tuple[str, ...] = ("none", "diagnostic", "kl_gate")
 
     federated_manager_keys: tuple[str, ...] = (
@@ -212,6 +213,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         "server_actor_lr",
         "server_actor_delta_scale",
         "actor_gradient_mode",
+        "actor_updates_per_round",
+        "local_actor_updates_per_round",
         "server_actor_optimizer",
         "vecnormalize_sync_mode",
         "dual_return_source",
@@ -241,15 +244,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self.dual_lr = float(kwargs.pop("dual_lr", 0.05))
         self.initial_lambda = kwargs.pop("initial_lambda", None)
 
-        # ``server_actor_lr`` is retained as a backward-compatible alias.
-        # In the local-update variant it scales an already-computed actor delta,
-        # so the natural default is 1.0 rather than the PPO learning rate.
-        server_actor_delta_scale = kwargs.pop(
-            "server_actor_delta_scale",
-            kwargs.pop("server_actor_lr", None),
-        )
+        raw_server_actor_lr = kwargs.pop("server_actor_lr", None)
+        self.server_actor_lr = None if raw_server_actor_lr is None else float(raw_server_actor_lr)
+        if self.server_actor_lr is not None and self.server_actor_lr <= 0.0:
+            raise ValueError(f"server_actor_lr must be positive, got {self.server_actor_lr}.")
+
+        raw_server_actor_delta_scale = kwargs.pop("server_actor_delta_scale", None)
         self.server_actor_delta_scale = (
-            1.0 if server_actor_delta_scale is None else float(server_actor_delta_scale)
+            1.0 if raw_server_actor_delta_scale is None else float(raw_server_actor_delta_scale)
         )
         if self.server_actor_delta_scale <= 0.0:
             raise ValueError(
@@ -257,9 +259,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 f"got {self.server_actor_delta_scale}."
             )
 
-        # Accepted only for backward compatibility with existing configs.
-        # Actor gradients are no longer uploaded in this implementation.
-        kwargs.pop("actor_gradient_mode", None)
+        self.actor_gradient_mode = self._normalize_actor_gradient_mode(
+            kwargs.pop("actor_gradient_mode", "mean")
+        )
+        actor_updates_alias = kwargs.pop("local_actor_updates_per_round", None)
+        raw_actor_updates_per_round = kwargs.pop("actor_updates_per_round", actor_updates_alias)
+        self.actor_updates_per_round = self._normalize_actor_updates_per_round(raw_actor_updates_per_round)
         self.critic_sync_mode = self._normalize_critic_sync_mode(kwargs.pop("critic_sync_mode", "local"))
         self.vecnormalize_sync_mode = self._normalize_vecnormalize_sync_mode(
             kwargs.pop("vecnormalize_sync_mode", "obs_reward")
@@ -295,6 +300,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if raw_actor_update_mode is None:
             raw_actor_update_mode = "standard"
         self.local_actor_update_mode = self._normalize_local_actor_update_mode(raw_actor_update_mode)
+        if self.actor_updates_per_round is not None and self.local_actor_update_mode != "standard":
+            raise ValueError(
+                "actor_updates_per_round is supported only with local_actor_update_mode='standard'."
+            )
 
         momentum_beta_alias = kwargs.pop("local_momentum_beta", None)
         raw_momentum_beta = kwargs.pop("momentum_beta", momentum_beta_alias)
@@ -349,6 +358,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_critic_state: FederatedModules | None = None
         self._ampo_last_critic_delta: FederatedModules | None = None
         self._ampo_last_num_actor_batches: int = 0
+        self._ampo_last_actor_updates_applied: int = 0
+        self._ampo_last_actor_step_lr: float = 0.0
         self._ampo_last_current_actor_grad_norm: float = 0.0
         self._ampo_last_reference_actor_grad_norm: float = 0.0
         self._ampo_last_gradient_difference_norm: float = 0.0
@@ -451,6 +462,30 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 f"Unsupported dual_update_mode={mode!r}. Choose one of {cls.valid_dual_update_modes}."
             )
         return normalized
+
+    @classmethod
+    def _normalize_actor_gradient_mode(cls, mode: str) -> str:
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {"sum": "cumulative", "accumulate": "cumulative", "average": "mean", "avg": "mean"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_actor_gradient_modes:
+            raise ValueError(
+                f"Unsupported actor_gradient_mode={mode!r}. Choose one of {cls.valid_actor_gradient_modes}."
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_actor_updates_per_round(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "none", "null", "legacy", "default", "match_critic"}:
+                return None
+        count = int(value)
+        if count <= 0:
+            raise ValueError(f"actor_updates_per_round must be positive or None, got {value!r}.")
+        return count
 
     @classmethod
     def _normalize_local_actor_update_mode(cls, mode: str) -> str:
@@ -941,6 +976,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if initial.shape != (num_clients,):
             raise ValueError(f"initial_lambda shape mismatch: expected {(num_clients,)}, got {initial.shape}.")
         self.lambda_weights = self._project_dual_weights(initial, num_clients)
+
+    def _current_controlled_actor_lr(self) -> float:
+        if self.server_actor_lr is not None:
+            return float(self.server_actor_lr)
+        lr = self.lr_schedule(self._current_progress_remaining) if callable(self.lr_schedule) else self.learning_rate
+        return float(lr) if lr is not None else 3e-4
 
     def _current_server_actor_delta_scale(self) -> float:
         return float(self.server_actor_delta_scale)
@@ -1486,6 +1527,117 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             self._ampo_last_gradient_cosine_mean = float(np.mean(gradient_cosines))
             self._ampo_last_gradient_cosine_min = float(np.min(gradient_cosines))
 
+    def _update_local_critic_and_actor_controlled(self) -> None:
+        actor_params = self._actor_named_parameters()
+        if not actor_params:
+            raise RuntimeError("Could not identify actor parameters for controlled local actor updates.")
+
+        critic_params = self._critic_named_parameters()
+        module_name = self.federated_actor_module_name
+        total_size = self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs
+        batch_size = self.batch_size or total_size
+        batches_per_epoch = (total_size + batch_size - 1) // batch_size
+        total_batches = int(self.n_epochs * batches_per_epoch)
+        requested_updates = int(self.actor_updates_per_round or 0)
+        if requested_updates <= 0:
+            raise RuntimeError("Controlled actor update path requires actor_updates_per_round >= 1.")
+        if requested_updates > total_batches:
+            raise ValueError(
+                "actor_updates_per_round cannot exceed the number of PPO minibatches in one round: "
+                f"requested={requested_updates}, available={total_batches}."
+            )
+
+        self.policy.set_training_mode(True)
+        critic_learning_rate = float(self.lr_schedule(self._current_progress_remaining))
+        actor_step_lr = self._current_controlled_actor_lr()
+        self._set_optimizer_learning_rate(self.policy.optimizer, critic_learning_rate)
+
+        accumulated_gradient = self._zero_like_actor_state()
+        group_batches = 0
+        num_batches = 0
+        updates_applied = 0
+        approx_kls: list[float] = []
+        actor_grad_norms: list[float] = []
+
+        def apply_accumulated_actor_update() -> None:
+            nonlocal accumulated_gradient, group_batches, updates_applied
+            if group_batches <= 0:
+                return
+            step_gradient = self._clone_modules(accumulated_gradient)
+            if self.actor_gradient_mode == "mean":
+                for module_state in step_gradient.values():
+                    for key in module_state.keys():
+                        module_state[key] /= float(group_batches)
+            actor_state = self._get_actor_state()
+            actor_updated = self._add_scaled_modules(actor_state, step_gradient, actor_step_lr)
+            self._copy_actor_parameters_without_optimizer_reset(actor_updated)
+            accumulated_gradient = self._zero_like_actor_state()
+            group_batches = 0
+            updates_applied += 1
+
+        for _ in range(self.n_epochs):
+            for rollout_data in self._iter_rollout_minibatches():
+                actions = self._prepare_rollout_actions(rollout_data.actions)
+                if self.use_sde:
+                    self.policy.reset_noise(self.batch_size)
+
+                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
+                actor_minimization_loss = self._ppo_actor_loss(log_prob, entropy, rollout_data)
+                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(values, rollout_data)
+
+                if self.target_kl is not None or self.dual_aware_drift_mode != "none":
+                    approx_kls.append(self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob))
+
+                self.policy.optimizer.zero_grad(set_to_none=True)
+                actor_minimization_loss.backward(retain_graph=bool(critic_params))
+                for name, parameter in self.policy.named_parameters():
+                    if name not in actor_params:
+                        parameter.grad = None
+                th.nn.utils.clip_grad_norm_(list(actor_params.values()), self.max_grad_norm)
+
+                batch_actor_gradients: dict[str, th.Tensor] = {}
+                for name, parameter in actor_params.items():
+                    if parameter.grad is not None:
+                        ascent_gradient = -parameter.grad.detach().cpu()
+                        batch_actor_gradients[name] = ascent_gradient
+                        if name in accumulated_gradient[module_name]:
+                            accumulated_gradient[module_name][name] += ascent_gradient
+                if batch_actor_gradients:
+                    actor_grad_norms.append(self._named_gradient_norm(batch_actor_gradients))
+
+                self.policy.optimizer.zero_grad(set_to_none=True)
+                if critic_params:
+                    critic_minimization_loss.backward()
+                    for name, parameter in self.policy.named_parameters():
+                        if name not in critic_params:
+                            parameter.grad = None
+                    th.nn.utils.clip_grad_norm_(list(critic_params.values()), self.max_grad_norm)
+                    self.policy.optimizer.step()
+                    self.policy.optimizer.zero_grad(set_to_none=True)
+
+                num_batches += 1
+                group_batches += 1
+                next_boundary = int(np.ceil((updates_applied + 1) * total_batches / requested_updates))
+                if num_batches >= next_boundary and updates_applied < requested_updates:
+                    apply_accumulated_actor_update()
+
+        if num_batches == 0:
+            raise RuntimeError("No rollout minibatches were available for controlled actor updates.")
+        if group_batches > 0 and updates_applied < requested_updates:
+            apply_accumulated_actor_update()
+        if updates_applied != requested_updates:
+            raise RuntimeError(
+                f"Expected {requested_updates} actor updates, applied {updates_applied}."
+            )
+
+        self._ampo_last_num_actor_batches = num_batches
+        self._ampo_last_actor_updates_applied = updates_applied
+        self._ampo_last_actor_step_lr = actor_step_lr
+        self._ampo_last_current_actor_grad_norm = float(np.mean(actor_grad_norms)) if actor_grad_norms else 0.0
+        if approx_kls:
+            self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
+            self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
+
     def _update_local_actor_and_critic(
         self,
         global_actor_state: FederatedModules,
@@ -1500,7 +1652,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_gradient_cosine_mean = float("nan")
         self._ampo_last_gradient_cosine_min = float("nan")
 
-        if self.local_actor_update_mode == "momentum":
+        self._ampo_last_actor_updates_applied = 0
+        self._ampo_last_actor_step_lr = 0.0
+
+        if self.actor_updates_per_round is not None:
+            self._update_local_critic_and_actor_controlled()
+        elif self.local_actor_update_mode == "momentum":
             self._update_local_actor_and_critic_momentum(global_actor_state)
         else:
             self._update_local_actor_and_critic_standard()
@@ -1561,6 +1718,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "actor_delta": self._clone_modules(self._ampo_last_actor_delta),
             "return": float(self._ampo_last_return),
             "num_actor_batches": int(self._ampo_last_num_actor_batches),
+            "actor_updates_per_round": self.actor_updates_per_round,
+            "actor_updates_applied": int(self._ampo_last_actor_updates_applied),
+            "actor_gradient_mode": self.actor_gradient_mode,
+            "actor_step_lr": float(self._ampo_last_actor_step_lr),
+            "server_actor_lr": self.server_actor_lr,
+            "server_actor_delta_scale": float(self.server_actor_delta_scale),
             "lambda_weights": None if self.lambda_weights is None else self.lambda_weights.copy(),
             "critic_sync_mode": self.critic_sync_mode,
             "dual_update_mode": self.dual_update_mode,
@@ -1659,6 +1822,19 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(f"Mixed local_actor_update_mode values are not supported: {actor_update_modes}.")
         local_actor_update_mode = next(iter(actor_update_modes))
 
+        actor_gradient_modes = {
+            cls._normalize_actor_gradient_mode(str(upload.get("actor_gradient_mode", "mean")))
+            for upload in uploads
+        }
+        if len(actor_gradient_modes) != 1:
+            raise ValueError(f"Mixed actor_gradient_mode values are not supported: {actor_gradient_modes}.")
+        actor_gradient_mode = next(iter(actor_gradient_modes))
+
+        actor_update_counts = {upload.get("actor_updates_per_round", None) for upload in uploads}
+        if len(actor_update_counts) != 1:
+            raise ValueError(f"Mixed actor_updates_per_round values are not supported: {actor_update_counts}.")
+        actor_updates_per_round = cls._normalize_actor_updates_per_round(next(iter(actor_update_counts)))
+
         dual_aware_modes = {
             cls._normalize_dual_aware_drift_mode(str(upload.get("dual_aware_drift_mode", "none")))
             for upload in uploads
@@ -1690,6 +1866,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         dual_aware_kl_target = float(_shared_value("dual_aware_kl_target", 0.02))
         dual_aware_correction_strength = float(_shared_value("dual_aware_correction_strength", 1.0))
         dual_aware_min_delta_scale = float(_shared_value("dual_aware_min_delta_scale", 0.5))
+        server_actor_lr = _shared_value("server_actor_lr", None)
+        server_actor_delta_scale = float(_shared_value("server_actor_delta_scale", 1.0))
 
         payload: FederatedPayload = {
             "client_actor_deltas": [upload["actor_delta"] for upload in uploads],
@@ -1698,6 +1876,18 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 [int(upload.get("num_actor_batches", 0)) for upload in uploads],
                 dtype=np.int32,
             ),
+            "client_actor_updates_applied": np.asarray(
+                [int(upload.get("actor_updates_applied", 0)) for upload in uploads],
+                dtype=np.int32,
+            ),
+            "client_actor_step_lrs": np.asarray(
+                [float(upload.get("actor_step_lr", 0.0)) for upload in uploads],
+                dtype=np.float64,
+            ),
+            "actor_updates_per_round": actor_updates_per_round,
+            "actor_gradient_mode": actor_gradient_mode,
+            "server_actor_lr": server_actor_lr,
+            "server_actor_delta_scale": server_actor_delta_scale,
             "critic_sync_mode": critic_sync_mode,
             "dual_update_mode": dual_update_mode,
             "vecnormalize_sync_mode": vecnormalize_sync_mode,
@@ -1821,6 +2011,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         payload_actor_update_mode = self._normalize_local_actor_update_mode(
             str(payload.get("local_actor_update_mode", "standard"))
         )
+        payload_actor_gradient_mode = self._normalize_actor_gradient_mode(
+            str(payload.get("actor_gradient_mode", "mean"))
+        )
+        payload_actor_updates_per_round = self._normalize_actor_updates_per_round(
+            payload.get("actor_updates_per_round", None)
+        )
         payload_dual_aware_mode = self._normalize_dual_aware_drift_mode(
             str(payload.get("dual_aware_drift_mode", "none"))
         )
@@ -1853,6 +2049,36 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             raise ValueError(
                 f"Server local_actor_update_mode={self.local_actor_update_mode!r} does not match "
                 f"payload {payload_actor_update_mode!r}."
+            )
+        if payload_actor_gradient_mode != self.actor_gradient_mode:
+            raise ValueError(
+                f"Server actor_gradient_mode={self.actor_gradient_mode!r} does not match "
+                f"payload {payload_actor_gradient_mode!r}."
+            )
+        if payload_actor_updates_per_round != self.actor_updates_per_round:
+            raise ValueError(
+                f"Server actor_updates_per_round={self.actor_updates_per_round!r} does not match "
+                f"payload {payload_actor_updates_per_round!r}."
+            )
+        payload_server_actor_lr = payload.get("server_actor_lr", self.server_actor_lr)
+        if payload_server_actor_lr is not None:
+            payload_server_actor_lr = float(payload_server_actor_lr)
+        if (payload_server_actor_lr is None) != (self.server_actor_lr is None) or (
+            payload_server_actor_lr is not None
+            and self.server_actor_lr is not None
+            and not np.isclose(payload_server_actor_lr, self.server_actor_lr)
+        ):
+            raise ValueError(
+                f"Server server_actor_lr={self.server_actor_lr!r} does not match "
+                f"payload {payload_server_actor_lr!r}."
+            )
+        payload_server_actor_delta_scale = float(
+            payload.get("server_actor_delta_scale", self.server_actor_delta_scale)
+        )
+        if not np.isclose(payload_server_actor_delta_scale, self.server_actor_delta_scale):
+            raise ValueError(
+                f"Server server_actor_delta_scale={self.server_actor_delta_scale} does not match "
+                f"payload {payload_server_actor_delta_scale}."
             )
         if payload_dual_aware_mode != self.dual_aware_drift_mode:
             raise ValueError(
