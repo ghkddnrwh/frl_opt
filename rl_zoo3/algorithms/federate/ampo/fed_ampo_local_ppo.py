@@ -175,11 +175,12 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
     minibatches and communication rounds; the state is initialized from the
     first global-reference gradient when momentum mode is first activated.
 
-    ``dual_aware_drift_mode="none"`` is the default and preserves the original
-    algorithm. ``"diagnostic"`` logs local-policy KL without changing training.
-    ``"kl_gate"`` optionally suppresses only high-lambda client deltas when their
-    local PPO KL exceeds ``dual_aware_kl_target``; the dual update itself is not
-    changed.
+    ``dual_aware_drift_mode="none"`` preserves the original optimization.
+    ``"diagnostic"`` logs local-policy KL without changing training. ``"kl_gate"``
+    adds an adaptive local KL penalty to the PPO actor objective; the penalty
+    coefficient increases when policy drift exceeds ``dual_aware_kl_target`` and
+    decreases when drift is comfortably below it. Server actor aggregation and the
+    dual update are left unchanged.
     """
 
     federated_actor_module_name = "policy"
@@ -235,6 +236,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         "dual_aware_kl_target",
         "dual_aware_correction_strength",
         "dual_aware_min_delta_scale",
+        "kl_gate_initial_coef",
+        "kl_gate_adaptation_factor",
+        "kl_gate_tolerance",
+        "kl_gate_min_coef",
+        "kl_gate_max_coef",
         "log_wandb",
     )
 
@@ -311,21 +317,38 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if not (0.0 <= self.momentum_beta <= 1.0):
             raise ValueError(f"momentum_beta must be in [0, 1], got {self.momentum_beta}.")
 
-        # Optional dual-aware drift control.  The default ``none`` leaves the
-        # original FedAMPO-LocalPPO optimization path unchanged.  ``diagnostic``
-        # measures local-policy KL without changing the update, while ``kl_gate``
-        # attenuates only high-dual-weight client deltas whose local PPO drift is
-        # above the configured KL target.
+        # Optional policy-drift control. ``diagnostic`` only measures local PPO
+        # KL. ``kl_gate`` adds a soft adaptive KL penalty to the local actor loss;
+        # server aggregation remains the ordinary AMPO lambda-weighted average.
         self.dual_aware_drift_mode = self._normalize_dual_aware_drift_mode(
             kwargs.pop("dual_aware_drift_mode", "diagnostic")
         )
         raw_dual_aware_kl_target = kwargs.pop("dual_aware_kl_target", None)
+        # Legacy server-side gate knobs are still accepted for checkpoint/config
+        # compatibility, but kl_gate now acts locally through an adaptive KL
+        # penalty and no longer rescales client deltas on the server.
         self.dual_aware_correction_strength = float(kwargs.pop("dual_aware_correction_strength", 1.0))
         if not (0.0 <= self.dual_aware_correction_strength <= 1.0):
             raise ValueError("dual_aware_correction_strength must be in [0, 1].")
         self.dual_aware_min_delta_scale = float(kwargs.pop("dual_aware_min_delta_scale", 0.5))
         if not (0.0 < self.dual_aware_min_delta_scale <= 1.0):
             raise ValueError("dual_aware_min_delta_scale must be in (0, 1].")
+
+        self.kl_gate_initial_coef = float(kwargs.pop("kl_gate_initial_coef", 1.0))
+        self.kl_gate_adaptation_factor = float(kwargs.pop("kl_gate_adaptation_factor", 1.5))
+        self.kl_gate_tolerance = float(kwargs.pop("kl_gate_tolerance", 1.5))
+        self.kl_gate_min_coef = float(kwargs.pop("kl_gate_min_coef", 1e-4))
+        self.kl_gate_max_coef = float(kwargs.pop("kl_gate_max_coef", 100.0))
+        if self.kl_gate_initial_coef < 0.0:
+            raise ValueError("kl_gate_initial_coef must be non-negative.")
+        if self.kl_gate_adaptation_factor <= 1.0:
+            raise ValueError("kl_gate_adaptation_factor must be > 1.")
+        if self.kl_gate_tolerance <= 1.0:
+            raise ValueError("kl_gate_tolerance must be > 1.")
+        if self.kl_gate_min_coef < 0.0:
+            raise ValueError("kl_gate_min_coef must be non-negative.")
+        if self.kl_gate_max_coef <= 0.0 or self.kl_gate_max_coef < self.kl_gate_min_coef:
+            raise ValueError("kl_gate_max_coef must be positive and >= kl_gate_min_coef.")
 
         raw_dual_mode = kwargs.pop("dual_update_mode", None)
         fixed_uniform = self._as_bool(kwargs.pop("fixed_uniform_lambda", False)) or self._as_bool(
@@ -342,15 +365,28 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         super().__init__(*args, **kwargs)
 
         if raw_dual_aware_kl_target is None:
-            # Reuse PPO's target_kl when available; otherwise use a modest
-            # diagnostic/gating reference.  This value is inert in mode="none".
-            self.dual_aware_kl_target = (
-                float(self.target_kl) if self.target_kl is not None else 0.02
-            )
+            # The adaptive local KL penalty needs a materially larger target than
+            # the old diagnostic-only 0.02 default.  If PPO target_kl is explicitly
+            # configured, honor it; otherwise 0.06 is the data-informed default
+            # for kl_gate and 0.02 remains the diagnostic reference.
+            if self.target_kl is not None:
+                self.dual_aware_kl_target = float(self.target_kl)
+            elif self.dual_aware_drift_mode == "kl_gate":
+                self.dual_aware_kl_target = 0.06
+            else:
+                self.dual_aware_kl_target = 0.02
         else:
             self.dual_aware_kl_target = float(raw_dual_aware_kl_target)
         if self.dual_aware_kl_target <= 0.0:
             raise ValueError("dual_aware_kl_target must be positive.")
+
+        self._ampo_kl_penalty_coef = float(
+            np.clip(self.kl_gate_initial_coef, self.kl_gate_min_coef, self.kl_gate_max_coef)
+        )
+        self._ampo_last_kl_penalty_mean: float = 0.0
+        self._ampo_last_clip_fraction_mean: float = 0.0
+        self._ampo_last_kl_gate_adapt_up: int = 0
+        self._ampo_last_kl_gate_adapt_down: int = 0
 
         self.lambda_weights: np.ndarray | None = None
         self._ampo_last_actor_delta: FederatedModules | None = None
@@ -899,16 +935,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         lambda_weights: np.ndarray,
         client_kl_maxes: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return per-client delta scales and diagnostics for dual-aware KL gating.
+        """Return legacy server-side drift diagnostics.
 
-        The gate is deliberately one-sided: a client is attenuated only when
-        (i) its current AMPO weight is above uniform and (ii) its local PPO KL
-        exceeds the reference target.  Thus uniform/dual-off training is exactly
-        unchanged even when ``kl_gate`` is enabled.
-
-        Let a_k = max(K lambda_k - 1, 0)/(K-1), and for KL_k > tau let
-        d_k = (KL_k/tau - 1)/(KL_k/tau).  The risk q_k=a_k d_k lies in [0,1],
-        and the server uses s_k=max(s_min, 1-alpha q_k).
+        kl_gate no longer changes server aggregation, so ``scales`` always stays
+        at one.  The lambda-importance/drift/risk values are retained only for
+        backwards-compatible logging and ablation diagnostics.
         """
         weights = np.asarray(lambda_weights, dtype=np.float64)
         kl_values = np.asarray(client_kl_maxes, dtype=np.float64)
@@ -933,9 +964,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         drift = np.divide(excess, 1.0 + excess, out=np.zeros_like(excess), where=np.isfinite(excess))
         risk = np.clip(importance * drift, 0.0, 1.0)
 
-        if self.dual_aware_drift_mode == "kl_gate":
-            scales = 1.0 - self.dual_aware_correction_strength * risk
-            scales = np.clip(scales, self.dual_aware_min_delta_scale, 1.0)
+        # kl_gate now regularizes the local PPO actor objective directly.  Keep
+        # these legacy quantities as diagnostics, but never rescale client deltas
+        # on the server; this avoids coupling policy-drift control to AMPO lambda.
         return scales, importance, drift, risk
 
     @staticmethod
@@ -1227,6 +1258,36 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             approx_kl = th.mean((th.exp(log_ratio) - 1.0) - log_ratio)
         return float(approx_kl.detach().cpu().item())
 
+    @staticmethod
+    def _differentiable_approx_kl(log_prob: th.Tensor, old_log_prob: th.Tensor) -> th.Tensor:
+        log_ratio = log_prob - old_log_prob
+        return th.mean((th.exp(log_ratio) - 1.0) - log_ratio)
+
+    def _clip_fraction_from_log_prob(self, log_prob: th.Tensor, old_log_prob: th.Tensor) -> float:
+        with th.no_grad():
+            ratio = th.exp(log_prob - old_log_prob)
+            clip_range = self._current_clip_range()
+            clipped = th.abs(ratio - 1.0) > clip_range
+        return float(clipped.float().mean().detach().cpu().item())
+
+    def _adapt_kl_gate_coefficient(self, observed_kl: float) -> None:
+        if self.dual_aware_drift_mode != "kl_gate" or not np.isfinite(observed_kl):
+            return
+        target = float(self.dual_aware_kl_target)
+        upper = target * float(self.kl_gate_tolerance)
+        lower = target / float(self.kl_gate_tolerance)
+        old_coef = float(self._ampo_kl_penalty_coef)
+        new_coef = old_coef
+        if observed_kl > upper:
+            new_coef = old_coef * float(self.kl_gate_adaptation_factor)
+            self._ampo_last_kl_gate_adapt_up += 1
+        elif observed_kl < lower:
+            new_coef = old_coef / float(self.kl_gate_adaptation_factor)
+            self._ampo_last_kl_gate_adapt_down += 1
+        self._ampo_kl_penalty_coef = float(
+            np.clip(new_coef, self.kl_gate_min_coef, self.kl_gate_max_coef)
+        )
+
     def _capture_named_gradients(
         self,
         parameter_names: Sequence[str] | None = None,
@@ -1293,12 +1354,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             parameter.grad = gradient
 
     def _update_local_actor_and_critic_standard(self) -> None:
-        """Run standard local PPO optimization on the collected global-policy rollout."""
+        """Run standard local PPO, optionally with adaptive KL regularization."""
         self.policy.set_training_mode(True)
         learning_rate = self.lr_schedule(self._current_progress_remaining)
         self._set_optimizer_learning_rate(self.policy.optimizer, float(learning_rate))
 
         approx_kls: list[float] = []
+        kl_penalties: list[float] = []
+        clip_fractions: list[float] = []
         num_batches = 0
         continue_training = True
         for _ in range(self.n_epochs):
@@ -1311,24 +1374,36 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     rollout_data.observations,
                     actions,
                 )
-                actor_minimization_loss = self._ppo_actor_loss(
-                    log_prob,
-                    entropy,
-                    rollout_data,
-                )
-                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
-                    values,
-                    rollout_data,
-                )
-                loss = actor_minimization_loss + critic_minimization_loss
 
-                # Keep the default path identical: KL is evaluated only when PPO
-                # already needs target_kl or the optional diagnostic/gate is enabled.
                 approx_kl: float | None = None
                 if self.target_kl is not None or self.dual_aware_drift_mode != "none":
                     approx_kl = self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob)
                     if self.dual_aware_drift_mode != "none":
                         approx_kls.append(approx_kl)
+                        clip_fractions.append(
+                            self._clip_fraction_from_log_prob(log_prob, rollout_data.old_log_prob)
+                        )
+                    if self.dual_aware_drift_mode == "kl_gate":
+                        self._adapt_kl_gate_coefficient(approx_kl)
+
+                actor_minimization_loss = self._ppo_actor_loss(
+                    log_prob,
+                    entropy,
+                    rollout_data,
+                )
+                if self.dual_aware_drift_mode == "kl_gate":
+                    kl_penalty = self._differentiable_approx_kl(log_prob, rollout_data.old_log_prob)
+                    actor_minimization_loss = (
+                        actor_minimization_loss
+                        + float(self._ampo_kl_penalty_coef) * kl_penalty
+                    )
+                    kl_penalties.append(float(kl_penalty.detach().cpu().item()))
+
+                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
+                    values,
+                    rollout_data,
+                )
+                loss = actor_minimization_loss + critic_minimization_loss
 
                 self.policy.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -1348,9 +1423,13 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if num_batches == 0:
             raise RuntimeError("No rollout minibatches were available for local PPO optimization.")
         self._ampo_last_num_actor_batches = num_batches
+        self._ampo_last_actor_updates_applied = num_batches
+        self._ampo_last_actor_step_lr = float(learning_rate)
         if approx_kls:
             self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
             self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
+        self._ampo_last_kl_penalty_mean = float(np.mean(kl_penalties)) if kl_penalties else 0.0
+        self._ampo_last_clip_fraction_mean = float(np.mean(clip_fractions)) if clip_fractions else 0.0
 
 
     def _update_local_actor_and_critic_momentum(
@@ -1393,6 +1472,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         corrected_norms: list[float] = []
         gradient_cosines: list[float] = []
         approx_kls: list[float] = []
+        kl_penalties: list[float] = []
+        clip_fractions: list[float] = []
 
         num_batches = 0
         continue_training = True
@@ -1409,21 +1490,34 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     rollout_data.observations,
                     actions,
                 )
-                actor_minimization_loss = self._ppo_actor_loss(
-                    log_prob,
-                    entropy,
-                    rollout_data,
-                )
-                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
-                    values,
-                    rollout_data,
-                )
-
                 approx_kl: float | None = None
                 if self.target_kl is not None or self.dual_aware_drift_mode != "none":
                     approx_kl = self._approx_kl_from_log_prob(log_prob, rollout_data.old_log_prob)
                     if self.dual_aware_drift_mode != "none":
                         approx_kls.append(approx_kl)
+                        clip_fractions.append(
+                            self._clip_fraction_from_log_prob(log_prob, rollout_data.old_log_prob)
+                        )
+                    if self.dual_aware_drift_mode == "kl_gate":
+                        self._adapt_kl_gate_coefficient(approx_kl)
+
+                actor_minimization_loss = self._ppo_actor_loss(
+                    log_prob,
+                    entropy,
+                    rollout_data,
+                )
+                if self.dual_aware_drift_mode == "kl_gate":
+                    kl_penalty = self._differentiable_approx_kl(log_prob, rollout_data.old_log_prob)
+                    actor_minimization_loss = (
+                        actor_minimization_loss
+                        + float(self._ampo_kl_penalty_coef) * kl_penalty
+                    )
+                    kl_penalties.append(float(kl_penalty.detach().cpu().item()))
+
+                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
+                    values,
+                    rollout_data,
+                )
 
                 # Actor component at the current local point.
                 self.policy.optimizer.zero_grad(set_to_none=True)
@@ -1452,6 +1546,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                         reference_entropy,
                         rollout_data,
                     )
+                    if self.dual_aware_drift_mode == "kl_gate":
+                        reference_actor_loss = (
+                            reference_actor_loss
+                            + float(self._ampo_kl_penalty_coef)
+                            * self._differentiable_approx_kl(
+                                reference_log_prob, rollout_data.old_log_prob
+                            )
+                        )
                     self.policy.optimizer.zero_grad(set_to_none=True)
                     reference_actor_loss.backward()
                     reference_actor_gradients = self._capture_named_gradients(actor_parameter_names)
@@ -1526,21 +1628,16 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if gradient_cosines:
             self._ampo_last_gradient_cosine_mean = float(np.mean(gradient_cosines))
             self._ampo_last_gradient_cosine_min = float(np.min(gradient_cosines))
+        self._ampo_last_kl_penalty_mean = float(np.mean(kl_penalties)) if kl_penalties else 0.0
+        self._ampo_last_clip_fraction_mean = float(np.mean(clip_fractions)) if clip_fractions else 0.0
 
     def _update_local_critic_and_actor_controlled(self) -> None:
         """Run standard-style local PPO with a bounded number of actor Adam steps.
 
-        ``actor_updates_per_round=None`` continues to use
-        ``_update_local_actor_and_critic_standard()``, i.e. one joint PPO optimizer
-        step per minibatch. For an integer U, all PPO minibatches are still used
-        and the critic is still optimized on every minibatch, while actor
-        gradients are averaged within U consecutive groups and applied through
-        the same ``self.policy.optimizer.step()`` used by standard PPO.
-
-        Therefore U == total_batches reduces to the standard local-PPO update
-        (up to floating-point roundoff). Smaller U changes only the frequency of
-        actor optimizer steps; it does not use a manual parameter-addition actor
-        update and does not reuse ``server_actor_lr`` as the local actor LR.
+        kl_gate adds a soft adaptive KL penalty against the rollout behavior
+        policy.  It does not hard-rollback local steps and it does not rescale
+        client deltas at the server.  The coefficient is adapted once per actor
+        update group so U controls update frequency while the gate controls drift.
         """
         actor_params = self._actor_named_parameters()
         if not actor_params:
@@ -1560,6 +1657,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 "actor_updates_per_round cannot exceed the number of PPO minibatches in one round: "
                 f"requested={requested_updates}, available={total_batches}."
             )
+        if requested_updates == total_batches:
+            # Exact same code path as actor_updates_per_round=None.
+            self._update_local_actor_and_critic_standard()
+            return
 
         self.policy.set_training_mode(True)
         learning_rate = float(self.lr_schedule(self._current_progress_remaining))
@@ -1570,11 +1671,14 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             for name, parameter in actor_params.items()
         }
         group_batches = 0
+        group_kls: list[float] = []
         num_batches = 0
         updates_applied = 0
         stopped_early = False
         approx_kls: list[float] = []
         actor_grad_norms: list[float] = []
+        kl_penalties: list[float] = []
+        clip_fractions: list[float] = []
 
         for _ in range(self.n_epochs):
             for rollout_data in self._iter_rollout_minibatches():
@@ -1586,15 +1690,6 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     rollout_data.observations,
                     actions,
                 )
-                actor_minimization_loss = self._ppo_actor_loss(
-                    log_prob,
-                    entropy,
-                    rollout_data,
-                )
-                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
-                    values,
-                    rollout_data,
-                )
 
                 approx_kl: float | None = None
                 if self.target_kl is not None or self.dual_aware_drift_mode != "none":
@@ -1604,8 +1699,30 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     )
                     if self.dual_aware_drift_mode != "none":
                         approx_kls.append(approx_kl)
+                        clip_fractions.append(
+                            self._clip_fraction_from_log_prob(log_prob, rollout_data.old_log_prob)
+                        )
+                    if self.dual_aware_drift_mode == "kl_gate":
+                        group_kls.append(approx_kl)
 
-                # Actor gradient from the same PPO loss used by the standard path.
+                actor_minimization_loss = self._ppo_actor_loss(
+                    log_prob,
+                    entropy,
+                    rollout_data,
+                )
+                if self.dual_aware_drift_mode == "kl_gate":
+                    kl_penalty = self._differentiable_approx_kl(log_prob, rollout_data.old_log_prob)
+                    actor_minimization_loss = (
+                        actor_minimization_loss
+                        + float(self._ampo_kl_penalty_coef) * kl_penalty
+                    )
+                    kl_penalties.append(float(kl_penalty.detach().cpu().item()))
+
+                critic_minimization_loss = self.vf_coef * self._ppo_value_loss(
+                    values,
+                    rollout_data,
+                )
+
                 self.policy.optimizer.zero_grad(set_to_none=True)
                 actor_minimization_loss.backward(retain_graph=True)
                 batch_actor_gradients = self._capture_named_gradients(actor_parameter_names)
@@ -1614,9 +1731,6 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                     accumulated_actor_gradients[name].add_(batch_actor_gradients[name])
                 group_batches += 1
 
-                # Ordinary critic gradient on the same minibatch. Capture all
-                # touched parameters so shared feature-extractor contributions
-                # are preserved.
                 self.policy.optimizer.zero_grad(set_to_none=True)
                 critic_minimization_loss.backward()
                 critic_gradients = self._capture_named_gradients()
@@ -1632,9 +1746,6 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                 )
 
                 if apply_actor_update:
-                    # Group averaging is the natural compressed counterpart of
-                    # standard minibatch PPO and avoids a group-size-dependent
-                    # actor step scale.
                     mean_actor_gradients = {
                         name: gradient / float(group_batches)
                         for name, gradient in accumulated_actor_gradients.items()
@@ -1643,19 +1754,19 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
                         mean_actor_gradients,
                         critic_gradients,
                     )
-                    # Match the standard path: clip the actual joint gradient
-                    # immediately before Adam updates the parameters.
                     th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()
                     self.policy.optimizer.zero_grad(set_to_none=True)
 
+                    if self.dual_aware_drift_mode == "kl_gate" and group_kls:
+                        self._adapt_kl_gate_coefficient(float(np.mean(group_kls)))
+
                     for gradient in accumulated_actor_gradients.values():
                         gradient.zero_()
                     group_batches = 0
+                    group_kls.clear()
                     updates_applied += 1
                 else:
-                    # Actor is held fixed on this minibatch; critic keeps its
-                    # ordinary per-minibatch PPO optimizer update.
                     for name, parameter in self.policy.named_parameters():
                         critic_gradient = critic_gradients.get(name)
                         parameter.grad = (
@@ -1696,6 +1807,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         if approx_kls:
             self._ampo_last_local_actor_kl_mean = float(np.mean(approx_kls))
             self._ampo_last_local_actor_kl_max = float(np.max(approx_kls))
+        self._ampo_last_kl_penalty_mean = float(np.mean(kl_penalties)) if kl_penalties else 0.0
+        self._ampo_last_clip_fraction_mean = float(np.mean(clip_fractions)) if clip_fractions else 0.0
+
 
     def _update_local_actor_and_critic(
         self,
@@ -1713,6 +1827,10 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
 
         self._ampo_last_actor_updates_applied = 0
         self._ampo_last_actor_step_lr = 0.0
+        self._ampo_last_kl_penalty_mean = 0.0
+        self._ampo_last_clip_fraction_mean = 0.0
+        self._ampo_last_kl_gate_adapt_up = 0
+        self._ampo_last_kl_gate_adapt_down = 0
 
         if self.actor_updates_per_round is not None:
             self._update_local_critic_and_actor_controlled()
@@ -1806,6 +1924,16 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_aware_kl_target": float(self.dual_aware_kl_target),
             "dual_aware_correction_strength": float(self.dual_aware_correction_strength),
             "dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
+            "kl_gate_initial_coef": float(self.kl_gate_initial_coef),
+            "kl_gate_adaptation_factor": float(self.kl_gate_adaptation_factor),
+            "kl_gate_tolerance": float(self.kl_gate_tolerance),
+            "kl_gate_min_coef": float(self.kl_gate_min_coef),
+            "kl_gate_max_coef": float(self.kl_gate_max_coef),
+            "kl_gate_penalty_coef": float(self._ampo_kl_penalty_coef),
+            "kl_gate_penalty_mean": float(self._ampo_last_kl_penalty_mean),
+            "kl_gate_clip_fraction_mean": float(self._ampo_last_clip_fraction_mean),
+            "kl_gate_adapt_up": int(self._ampo_last_kl_gate_adapt_up),
+            "kl_gate_adapt_down": int(self._ampo_last_kl_gate_adapt_down),
             "local_actor_kl_mean": float(self._ampo_last_local_actor_kl_mean),
             "local_actor_kl_max": float(self._ampo_last_local_actor_kl_max),
             "gradient_cosine_mean": float(self._ampo_last_gradient_cosine_mean),
@@ -1925,6 +2053,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         dual_aware_kl_target = float(_shared_value("dual_aware_kl_target", 0.02))
         dual_aware_correction_strength = float(_shared_value("dual_aware_correction_strength", 1.0))
         dual_aware_min_delta_scale = float(_shared_value("dual_aware_min_delta_scale", 0.5))
+        kl_gate_initial_coef = float(_shared_value("kl_gate_initial_coef", 1.0))
+        kl_gate_adaptation_factor = float(_shared_value("kl_gate_adaptation_factor", 1.5))
+        kl_gate_tolerance = float(_shared_value("kl_gate_tolerance", 1.5))
+        kl_gate_min_coef = float(_shared_value("kl_gate_min_coef", 1e-4))
+        kl_gate_max_coef = float(_shared_value("kl_gate_max_coef", 100.0))
         server_actor_lr = _shared_value("server_actor_lr", None)
         server_actor_delta_scale = float(_shared_value("server_actor_delta_scale", 1.0))
 
@@ -1982,6 +2115,26 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_aware_kl_target": dual_aware_kl_target,
             "dual_aware_correction_strength": dual_aware_correction_strength,
             "dual_aware_min_delta_scale": dual_aware_min_delta_scale,
+            "kl_gate_initial_coef": kl_gate_initial_coef,
+            "kl_gate_adaptation_factor": kl_gate_adaptation_factor,
+            "kl_gate_tolerance": kl_gate_tolerance,
+            "kl_gate_min_coef": kl_gate_min_coef,
+            "kl_gate_max_coef": kl_gate_max_coef,
+            "client_kl_gate_penalty_coefs": np.asarray(
+                [float(upload.get("kl_gate_penalty_coef", 0.0)) for upload in uploads], dtype=np.float64
+            ),
+            "client_kl_gate_penalty_means": np.asarray(
+                [float(upload.get("kl_gate_penalty_mean", 0.0)) for upload in uploads], dtype=np.float64
+            ),
+            "client_kl_gate_clip_fractions": np.asarray(
+                [float(upload.get("kl_gate_clip_fraction_mean", 0.0)) for upload in uploads], dtype=np.float64
+            ),
+            "client_kl_gate_adapt_ups": np.asarray(
+                [int(upload.get("kl_gate_adapt_up", 0)) for upload in uploads], dtype=np.int32
+            ),
+            "client_kl_gate_adapt_downs": np.asarray(
+                [int(upload.get("kl_gate_adapt_down", 0)) for upload in uploads], dtype=np.int32
+            ),
             "client_local_actor_kl_means": np.asarray(
                 [float(upload.get("local_actor_kl_mean", np.nan)) for upload in uploads],
                 dtype=np.float64,
@@ -2153,6 +2306,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             ("dual_aware_kl_target", self.dual_aware_kl_target),
             ("dual_aware_correction_strength", self.dual_aware_correction_strength),
             ("dual_aware_min_delta_scale", self.dual_aware_min_delta_scale),
+            ("kl_gate_initial_coef", self.kl_gate_initial_coef),
+            ("kl_gate_adaptation_factor", self.kl_gate_adaptation_factor),
+            ("kl_gate_tolerance", self.kl_gate_tolerance),
+            ("kl_gate_min_coef", self.kl_gate_min_coef),
+            ("kl_gate_max_coef", self.kl_gate_max_coef),
         ):
             payload_value = float(payload.get(key, server_value))
             if not np.isclose(payload_value, server_value):
@@ -2189,20 +2347,8 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         for key, value in actor_before[module_name].items():
             if th.is_floating_point(value):
                 delta = th.zeros_like(value)
-                if self.dual_aware_drift_mode == "kl_gate":
-                    for lambda_weight, client_scale, client_delta in zip(
-                        lambda_before, client_delta_scales, client_actor_deltas, strict=True
-                    ):
-                        delta += (
-                            client_delta[module_name][key].to(value.dtype)
-                            * float(lambda_weight)
-                            * float(client_scale)
-                        )
-                else:
-                    # Preserve the exact original aggregation when the optional
-                    # correction is disabled or diagnostic-only.
-                    for lambda_weight, client_delta in zip(lambda_before, client_actor_deltas, strict=True):
-                        delta += client_delta[module_name][key].to(value.dtype) * float(lambda_weight)
+                for lambda_weight, client_delta in zip(lambda_before, client_actor_deltas, strict=True):
+                    delta += client_delta[module_name][key].to(value.dtype) * float(lambda_weight)
                 aggregated_delta[module_name][key] = delta
             else:
                 aggregated_delta[module_name][key] = th.zeros_like(value)
@@ -2329,6 +2475,21 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             ),
             client_local_actor_kl_means=client_local_actor_kl_means,
             client_local_actor_kl_maxes=client_local_actor_kl_maxes,
+            client_kl_gate_penalty_coefs=np.asarray(
+                payload.get("client_kl_gate_penalty_coefs", np.zeros(num_clients)), dtype=np.float64
+            ),
+            client_kl_gate_penalty_means=np.asarray(
+                payload.get("client_kl_gate_penalty_means", np.zeros(num_clients)), dtype=np.float64
+            ),
+            client_kl_gate_clip_fractions=np.asarray(
+                payload.get("client_kl_gate_clip_fractions", np.zeros(num_clients)), dtype=np.float64
+            ),
+            client_kl_gate_adapt_ups=np.asarray(
+                payload.get("client_kl_gate_adapt_ups", np.zeros(num_clients)), dtype=np.float64
+            ),
+            client_kl_gate_adapt_downs=np.asarray(
+                payload.get("client_kl_gate_adapt_downs", np.zeros(num_clients)), dtype=np.float64
+            ),
             client_gradient_cosine_means=np.asarray(
                 payload.get("client_gradient_cosine_means", np.full(num_clients, np.nan)), dtype=np.float64
             ),
@@ -2386,6 +2547,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
         client_corrected_actor_grad_norms: np.ndarray,
         client_local_actor_kl_means: np.ndarray,
         client_local_actor_kl_maxes: np.ndarray,
+        client_kl_gate_penalty_coefs: np.ndarray,
+        client_kl_gate_penalty_means: np.ndarray,
+        client_kl_gate_clip_fractions: np.ndarray,
+        client_kl_gate_adapt_ups: np.ndarray,
+        client_kl_gate_adapt_downs: np.ndarray,
         client_gradient_cosine_means: np.ndarray,
         client_gradient_cosine_mins: np.ndarray,
         client_delta_scales: np.ndarray,
@@ -2451,6 +2617,16 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "server/ampo/dual_aware_kl_target": float(self.dual_aware_kl_target),
             "server/ampo/dual_aware_correction_strength": float(self.dual_aware_correction_strength),
             "server/ampo/dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
+            "server/ampo/kl_gate_initial_coef": float(self.kl_gate_initial_coef),
+            "server/ampo/kl_gate_adaptation_factor": float(self.kl_gate_adaptation_factor),
+            "server/ampo/kl_gate_tolerance": float(self.kl_gate_tolerance),
+            "server/ampo/kl_gate_min_coef": float(self.kl_gate_min_coef),
+            "server/ampo/kl_gate_max_coef": float(self.kl_gate_max_coef),
+            "server/ampo/kl_gate_penalty_coef_mean": float(np.mean(client_kl_gate_penalty_coefs)),
+            "server/ampo/kl_gate_penalty_mean": float(np.mean(client_kl_gate_penalty_means)),
+            "server/ampo/kl_gate_clip_fraction_mean": float(np.mean(client_kl_gate_clip_fractions)),
+            "server/ampo/kl_gate_adapt_up_mean": float(np.mean(client_kl_gate_adapt_ups)),
+            "server/ampo/kl_gate_adapt_down_mean": float(np.mean(client_kl_gate_adapt_downs)),
             "server/ampo/dual_aware_scale_mean": float(np.mean(client_delta_scales)),
             "server/ampo/dual_aware_scale_min": float(np.min(client_delta_scales)),
             "server/ampo/dual_aware_risk_mean": float(np.mean(client_dual_aware_risks)),
@@ -2510,6 +2686,9 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             metrics[f"server/ampo/client_{client_idx}/dual_importance"] = float(client_dual_importance[client_idx])
             metrics[f"server/ampo/client_{client_idx}/kl_drift_score"] = float(client_kl_drift_scores[client_idx])
             metrics[f"server/ampo/client_{client_idx}/dual_aware_risk"] = float(client_dual_aware_risks[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/kl_gate_penalty_coef"] = float(client_kl_gate_penalty_coefs[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/kl_gate_penalty_mean"] = float(client_kl_gate_penalty_means[client_idx])
+            metrics[f"server/ampo/client_{client_idx}/kl_gate_clip_fraction"] = float(client_kl_gate_clip_fractions[client_idx])
             if np.isfinite(client_local_actor_kl_means[client_idx]):
                 metrics[f"server/ampo/client_{client_idx}/local_actor_kl_mean"] = float(
                     client_local_actor_kl_means[client_idx]
@@ -2555,6 +2734,11 @@ class FedAMPOLocalPPO(FederatedAlgorithmMixin, PPO):
             "dual_aware_kl_target": float(self.dual_aware_kl_target),
             "dual_aware_correction_strength": float(self.dual_aware_correction_strength),
             "dual_aware_min_delta_scale": float(self.dual_aware_min_delta_scale),
+            "kl_gate_initial_coef": float(self.kl_gate_initial_coef),
+            "kl_gate_adaptation_factor": float(self.kl_gate_adaptation_factor),
+            "kl_gate_tolerance": float(self.kl_gate_tolerance),
+            "kl_gate_min_coef": float(self.kl_gate_min_coef),
+            "kl_gate_max_coef": float(self.kl_gate_max_coef),
             "vecnormalize": self._get_filtered_vecnormalize_state(),
         }
         if self._uses_global_critic():

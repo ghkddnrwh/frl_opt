@@ -1,16 +1,16 @@
-# export_wandb_runs_2026_09_10_hardcoded_old_style.py
+# export_wandb_runs_2026_09_11_hardcoded_old_style.py
 #
-# 2026-09-10 W&B CSV의 run ID를 직접 하드코딩한 exporter.
+# 2026-09-11 W&B CSV의 run ID를 직접 하드코딩한 exporter.
 # 실행 시 CSV 파일은 필요하지 않습니다.
 #
-# CSV rows: 26
-# Unique run IDs: 26
-# State counts: {'finished': 20, 'running': 6}
+# CSV rows: 85
+# Unique run IDs: 85
+# State counts: {'finished': 70, 'running': 10, 'crashed': 5}
 #
 # Usage:
 #   pip install wandb
 #   wandb login
-#   python export_wandb_runs_2026_09_10_hardcoded_old_style.py
+#   python export_wandb_runs_2026_09_11_hardcoded_old_style.py
 
 import json
 import math
@@ -22,7 +22,7 @@ import wandb
 
 ENTITY = "ukjo19"
 PROJECT = "sb3"
-OUT_ROOT = "logs/wandb_logs_2026_09_10"
+OUT_ROOT = "logs/wandb_logs_2026_09_11"
 PAGE_SIZE = 500
 
 # True면 API 조회 시점에 finished인 run만 export
@@ -30,13 +30,88 @@ PAGE_SIZE = 500
 ONLY_FINISHED = False
 
 
-SOURCE_FILE_METADATA = {'wandb_export_2026-09-10T19_56_26.045+09_00.csv': {'rows': 26,
-                                                    'run_ids': 26,
-                                                    'state_counts': {'finished': 20, 'running': 6},
-                                                    'group_counts': {'ant_gravity': 11, 'ant_friction': 15}}}
+SOURCE_FILE_METADATA = {'wandb_export_2026-09-11T13_43_38.917+09_00.csv': {'rows': 85,
+                                                    'run_ids': 85,
+                                                    'unique_run_ids': 85,
+                                                    'state_counts': {'finished': 70, 'running': 10, 'crashed': 5},
+                                                    'group_counts': {'ant_friction': 35, 'ant_gravity': 50}}}
 
 
-RUN_IDS_BY_GROUP = {'ant_gravity': ['txd9r951',
+RUN_IDS_BY_GROUP = {'ant_friction': ['f28zs4lv',
+                  '23y13v46',
+                  'h8npgcqy',
+                  '402uf31e',
+                  'etlpas81',
+                  'ou0rh6tf',
+                  'djtninpi',
+                  'dszyhz2o',
+                  'dvsmrw60',
+                  'bstzx2nt',
+                  'bli50l87',
+                  'rq3l2kgw',
+                  '9qxlri3n',
+                  'tkrrfavo',
+                  '91y3ygr2',
+                  '5h4d24aa',
+                  'u00taxv3',
+                  '6xsvuja5',
+                  '1i6cnt64',
+                  'wqmggqvg',
+                  'ja3c3as0',
+                  'pygy749k',
+                  'dock5lrf',
+                  'hz9bsqmd',
+                  'x88852kl',
+                  '1ja51ty9',
+                  'wu1llop0',
+                  '8sjnxhao',
+                  'rdlwbqdb',
+                  'qompjwdz',
+                  'jwf8snum',
+                  '12vx94ul',
+                  '2885masn',
+                  'lw1n6s5o',
+                  '2qck97c6'],
+ 'ant_gravity': ['8pf5kn0n',
+                 'sz0ev9xg',
+                 '0i9s22kc',
+                 'xa3jhcry',
+                 '4uqcxc7q',
+                 'px8klaqv',
+                 'hrtbq363',
+                 '8d0ohzt6',
+                 'on4eilez',
+                 'snafa5v1',
+                 'lu58dwm3',
+                 'hist6g6q',
+                 'xnvecfjq',
+                 '440zo275',
+                 'hpaufgz6',
+                 '0w8x8po5',
+                 '2jk92wj0',
+                 'mg720wy1',
+                 '1ds7ri80',
+                 'm1v6m64t',
+                 'fhw3xa97',
+                 'pm0z3znj',
+                 '21slmgxf',
+                 '22tt4g07',
+                 'u37wtyta',
+                 'bafbxve8',
+                 'uw0q3a6v',
+                 'wlsjahsq',
+                 '6qra1bqf',
+                 'ufdow4cb',
+                 'kuqgkcal',
+                 '2dki2zwo',
+                 'it7pu58h',
+                 'y55viycr',
+                 'lv53hx1r',
+                 'jr20o7yh',
+                 '3n78no1b',
+                 'izccf1lc',
+                 'oc8d9bhl',
+                 'txd9r951',
                  'qe41rubq',
                  'd3f5rvdk',
                  'k7cxep04',
@@ -46,22 +121,7 @@ RUN_IDS_BY_GROUP = {'ant_gravity': ['txd9r951',
                  'glkpb52d',
                  '6yin9imk',
                  'm4zwwwhb',
-                 'wokyijat'],
- 'ant_friction': ['jwf8snum',
-                  '12vx94ul',
-                  '2885masn',
-                  'lw1n6s5o',
-                  '2qck97c6',
-                  'yfmjomu9',
-                  '9onjj7of',
-                  '8yghtffy',
-                  'm57sott7',
-                  'dr3pxzox',
-                  'v6dr4xhz',
-                  'kraa3swi',
-                  '29gnja2l',
-                  't7v7k2fh',
-                  'c8f46z8i']}
+                 'wokyijat']}
 
 
 RUN_IDS = list(dict.fromkeys(
@@ -101,10 +161,16 @@ def json_safe(x):
         pass
 
     if isinstance(x, dict):
-        return {str(k): json_safe(v) for k, v in x.items()}
+        return {
+            str(k): json_safe(v)
+            for k, v in x.items()
+        }
 
     if isinstance(x, (list, tuple)):
-        return [json_safe(v) for v in x]
+        return [
+            json_safe(v)
+            for v in x
+        ]
 
     return str(x)
 
@@ -132,8 +198,16 @@ def export_run(run, out_root: Path):
     run_id = str(run.id)
     group = group_for_run(run_id)
 
-    out = out_root / group / run_id
-    out.mkdir(parents=True, exist_ok=True)
+    out = (
+        out_root
+        / group
+        / run_id
+    )
+
+    out.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     # 1. config
     config = {
@@ -141,7 +215,11 @@ def export_run(run, out_root: Path):
         for k, v in dict(run.config).items()
         if not str(k).startswith("_")
     }
-    dump_json(out / "config.json", config)
+
+    dump_json(
+        out / "config.json",
+        config,
+    )
 
     # 2. summary
     try:
@@ -154,29 +232,76 @@ def export_run(run, out_root: Path):
         except Exception:
             summary = {}
 
-    dump_json(out / "summary.json", summary)
+    dump_json(
+        out / "summary.json",
+        summary,
+    )
 
     # 3. metadata
     try:
         api_path = "/".join(run.path)
 
     except Exception:
-        api_path = f"{ENTITY}/{PROJECT}/{run_id}"
+        api_path = (
+            f"{ENTITY}/"
+            f"{PROJECT}/"
+            f"{run_id}"
+        )
 
     metadata = {
         "experiment_group": group,
         "api_path": api_path,
-        "entity": getattr(run, "entity", None),
-        "project": getattr(run, "project", None),
-        "id": getattr(run, "id", None),
-        "name": getattr(run, "name", None),
-        "state": getattr(run, "state", None),
-        "created_at": getattr(run, "created_at", None),
-        "url": getattr(run, "url", None),
-        "tags": getattr(run, "tags", None),
-        "notes": getattr(run, "notes", None),
+        "entity": getattr(
+            run,
+            "entity",
+            None,
+        ),
+        "project": getattr(
+            run,
+            "project",
+            None,
+        ),
+        "id": getattr(
+            run,
+            "id",
+            None,
+        ),
+        "name": getattr(
+            run,
+            "name",
+            None,
+        ),
+        "state": getattr(
+            run,
+            "state",
+            None,
+        ),
+        "created_at": getattr(
+            run,
+            "created_at",
+            None,
+        ),
+        "url": getattr(
+            run,
+            "url",
+            None,
+        ),
+        "tags": getattr(
+            run,
+            "tags",
+            None,
+        ),
+        "notes": getattr(
+            run,
+            "notes",
+            None,
+        ),
     }
-    dump_json(out / "metadata.json", metadata)
+
+    dump_json(
+        out / "metadata.json",
+        metadata,
+    )
 
     # 4. full scalar history
     n_rows = 0
@@ -184,10 +309,18 @@ def export_run(run, out_root: Path):
     first_rows = []
     last_rows = []
 
-    history_path = out / "history.jsonl"
+    history_path = (
+        out
+        / "history.jsonl"
+    )
 
-    with history_path.open("w", encoding="utf-8") as f:
-        for row in run.scan_history(page_size=PAGE_SIZE):
+    with history_path.open(
+        "w",
+        encoding="utf-8",
+    ) as f:
+        for row in run.scan_history(
+            page_size=PAGE_SIZE
+        ):
             row = json_safe(row)
 
             f.write(
@@ -199,12 +332,19 @@ def export_run(run, out_root: Path):
             )
 
             n_rows += 1
-            all_keys.update(row.keys())
+
+            all_keys.update(
+                row.keys()
+            )
 
             if len(first_rows) < 5:
-                first_rows.append(row)
+                first_rows.append(
+                    row
+                )
 
-            last_rows.append(row)
+            last_rows.append(
+                row
+            )
 
             if len(last_rows) > 5:
                 last_rows.pop(0)
@@ -263,7 +403,10 @@ def export_run(run, out_root: Path):
         "```",
     ]
 
-    (out / "README_for_GPT.md").write_text(
+    (
+        out
+        / "README_for_GPT.md"
+    ).write_text(
         "\n".join(readme),
         encoding="utf-8",
     )
@@ -271,8 +414,16 @@ def export_run(run, out_root: Path):
     return {
         "id": run_id,
         "group": group,
-        "name": getattr(run, "name", None),
-        "state": getattr(run, "state", None),
+        "name": getattr(
+            run,
+            "name",
+            None,
+        ),
+        "state": getattr(
+            run,
+            "state",
+            None,
+        ),
         "history_rows": n_rows,
         "out_dir": str(out),
     }
@@ -281,19 +432,26 @@ def export_run(run, out_root: Path):
 def main():
     api = wandb.Api()
 
-    out_root = Path(OUT_ROOT)
+    out_root = Path(
+        OUT_ROOT
+    )
+
     out_root.mkdir(
         parents=True,
         exist_ok=True,
     )
 
     print(
-        f"[INFO] unique runs: {len(RUN_IDS)}"
+        f"[INFO] unique runs: "
+        f"{len(RUN_IDS)}"
     )
 
-    for group, ids in RUN_IDS_BY_GROUP.items():
+    for group, ids in (
+        RUN_IDS_BY_GROUP.items()
+    ):
         print(
-            f"  - {group}: {len(ids)}"
+            f"  - {group}: "
+            f"{len(ids)}"
         )
 
     print()
@@ -306,21 +464,34 @@ def main():
         RUN_IDS,
         start=1,
     ):
-        group = group_for_run(run_id)
+        group = group_for_run(
+            run_id
+        )
+
         api_path = (
-            f"{ENTITY}/{PROJECT}/{run_id}"
+            f"{ENTITY}/"
+            f"{PROJECT}/"
+            f"{run_id}"
         )
 
         print(
-            f"[{i:03d}/{len(RUN_IDS):03d}] "
-            f"{group} / {run_id}"
+            f"[{i:03d}/"
+            f"{len(RUN_IDS):03d}] "
+            f"{group} / "
+            f"{run_id}"
         )
 
         try:
-            run = api.run(api_path)
+            run = api.run(
+                api_path
+            )
 
             state = str(
-                getattr(run, "state", "")
+                getattr(
+                    run,
+                    "state",
+                    "",
+                )
             ).lower()
 
             if (
@@ -328,7 +499,8 @@ def main():
                 and state != "finished"
             ):
                 print(
-                    f"    SKIP: state={state}"
+                    f"    SKIP: "
+                    f"state={state}"
                 )
 
                 skipped.append({
@@ -344,7 +516,9 @@ def main():
                 out_root,
             )
 
-            exported.append(result)
+            exported.append(
+                result
+            )
 
             print(
                 f"    DONE: "
@@ -365,30 +539,43 @@ def main():
             })
 
     dump_json(
-        out_root / "_run_ids_by_group.json",
+        out_root
+        / "_run_ids_by_group.json",
         RUN_IDS_BY_GROUP,
     )
 
     dump_json(
-        out_root / "_source_file_metadata.json",
+        out_root
+        / "_source_file_metadata.json",
         SOURCE_FILE_METADATA,
     )
 
     dump_json(
-        out_root / "_export_summary.json",
+        out_root
+        / "_export_summary.json",
         {
             "entity": ENTITY,
             "project": PROJECT,
-            "unique_run_count": len(RUN_IDS),
-            "only_finished": ONLY_FINISHED,
+            "unique_run_count": len(
+                RUN_IDS
+            ),
+            "only_finished": (
+                ONLY_FINISHED
+            ),
             "expected_by_group": {
                 group: len(ids)
                 for group, ids
                 in RUN_IDS_BY_GROUP.items()
             },
-            "exported_count": len(exported),
-            "skipped_count": len(skipped),
-            "error_count": len(errors),
+            "exported_count": len(
+                exported
+            ),
+            "skipped_count": len(
+                skipped
+            ),
+            "error_count": len(
+                errors
+            ),
             "exported": exported,
             "skipped": skipped,
             "errors": errors,
@@ -397,21 +584,32 @@ def main():
 
     print()
     print("=" * 72)
+
     print(
-        f"Expected : {len(RUN_IDS)}"
+        f"Expected : "
+        f"{len(RUN_IDS)}"
     )
+
     print(
-        f"Exported : {len(exported)}"
+        f"Exported : "
+        f"{len(exported)}"
     )
+
     print(
-        f"Skipped  : {len(skipped)}"
+        f"Skipped  : "
+        f"{len(skipped)}"
     )
+
     print(
-        f"Errors   : {len(errors)}"
+        f"Errors   : "
+        f"{len(errors)}"
     )
+
     print(
-        f"Output   : {out_root}"
+        f"Output   : "
+        f"{out_root}"
     )
+
     print("=" * 72)
 
 
