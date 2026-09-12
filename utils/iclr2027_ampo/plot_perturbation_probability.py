@@ -1,9 +1,13 @@
 import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 
 
+# =============================================================================
 # Publication-style plotting defaults
+# =============================================================================
+
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman"],
@@ -17,6 +21,10 @@ plt.rcParams.update({
 })
 
 
+# =============================================================================
+# NPZ helper
+# =============================================================================
+
 def read_scalar_from_npz(data, key, default=None):
     """
     evaluations.npz 안의 scalar 값을 안전하게 읽는다.
@@ -26,7 +34,6 @@ def read_scalar_from_npz(data, key, default=None):
         num_clients.npy -> 5
         eval_round_freq.npy -> 40
     """
-
     if key not in data:
         return default
 
@@ -51,24 +58,42 @@ def infer_num_clients_from_npz(data, metric_array=None):
         3. metric array가 2D이면 두 번째 차원
         4. 실패하면 1
     """
-
-    num_clients = read_scalar_from_npz(data, "num_clients", default=None)
+    num_clients = read_scalar_from_npz(
+        data,
+        "num_clients",
+        default=None,
+    )
 
     if num_clients is not None:
         return int(num_clients)
 
     if "client_noises" in data:
-        return int(len(np.asarray(data["client_noises"])))
+        return int(
+            len(
+                np.asarray(
+                    data["client_noises"]
+                )
+            )
+        )
 
     if metric_array is not None:
-        metric_array = np.asarray(metric_array)
+        metric_array = np.asarray(
+            metric_array
+        )
+
         if metric_array.ndim == 2:
-            return int(metric_array.shape[1])
+            return int(
+                metric_array.shape[1]
+            )
 
     return 1
 
 
-def make_timesteps_from_npz(data, num_rounds, metric_array=None):
+def make_timesteps_from_npz(
+    data,
+    num_rounds,
+    metric_array=None,
+):
     """
     evaluations.npz 내부 값만 이용해서 x축 timesteps를 만든다.
 
@@ -76,44 +101,70 @@ def make_timesteps_from_npz(data, num_rounds, metric_array=None):
         1. timesteps.npy가 있으면 그대로 사용
         2. rounds.npy + local_steps.npy + num_clients.npy 사용
            x = rounds * local_steps * num_clients
-        3. rounds.npy + local_steps.npy만 있으면
-           x = rounds * local_steps
-        4. rounds.npy만 있으면 rounds 그대로 사용
-        5. 아무것도 없으면 0, 1, 2, ...
+        3. rounds.npy + local_steps.npy
+        4. rounds.npy
+        5. 0, 1, 2, ...
     """
-
     if "timesteps" in data:
-        return np.asarray(data["timesteps"], dtype=float)[:num_rounds]
+        return np.asarray(
+            data["timesteps"],
+            dtype=float,
+        )[:num_rounds]
 
     if "rounds" in data:
-        rounds = np.asarray(data["rounds"], dtype=float)[:num_rounds]
+        rounds = np.asarray(
+            data["rounds"],
+            dtype=float,
+        )[:num_rounds]
 
-        local_steps = read_scalar_from_npz(data, "local_steps", default=None)
+        local_steps = read_scalar_from_npz(
+            data,
+            "local_steps",
+            default=None,
+        )
 
         if local_steps is not None:
             num_clients = infer_num_clients_from_npz(
                 data=data,
                 metric_array=metric_array,
             )
-            return rounds * float(local_steps) * float(num_clients)
+
+            return (
+                rounds
+                * float(local_steps)
+                * float(num_clients)
+            )
 
         return rounds
 
-    return np.arange(num_rounds, dtype=float)
+    return np.arange(
+        num_rounds,
+        dtype=float,
+    )
 
+
+# =============================================================================
+# Evaluation round handling
+# =============================================================================
 
 def normalize_eval_round_freq(eval_round_freq):
-    """사용자가 지정한 evaluation round 주기를 양의 정수로 정규화한다."""
-
+    """
+    사용자가 지정한 evaluation round 주기를 양의 정수로 정규화한다.
+    """
     if eval_round_freq is None:
         return None
 
     value = float(eval_round_freq)
     rounded = int(round(value))
 
-    if not np.isfinite(value) or value <= 0 or not np.isclose(value, rounded):
+    if (
+        not np.isfinite(value)
+        or value <= 0
+        or not np.isclose(value, rounded)
+    ):
         raise ValueError(
-            f"eval_round_freq must be a positive integer, but got {eval_round_freq}"
+            f"eval_round_freq must be a positive integer, "
+            f"but got {eval_round_freq}"
         )
 
     return rounded
@@ -127,120 +178,213 @@ def get_logged_eval_round_freq(data, rounds):
         1. eval_round_freq.npy
         2. 없으면 rounds의 positive diff median으로 추정
 
-    마지막 학습 round를 강제로 평가해서
-    rounds가 [..., 3880, 3907]처럼 끝나더라도 median을 사용하므로
-    정규 evaluation 주기(예: 40)를 안정적으로 추정할 수 있다.
+    마지막 학습 round에서 추가 evaluation이 있어도
+    median을 사용해 정상 evaluation frequency를 추정한다.
     """
-
-    logged_freq = read_scalar_from_npz(data, "eval_round_freq", default=None)
+    logged_freq = read_scalar_from_npz(
+        data,
+        "eval_round_freq",
+        default=None,
+    )
 
     if logged_freq is not None:
         value = float(logged_freq)
         rounded = int(round(value))
-        if not np.isfinite(value) or value <= 0 or not np.isclose(value, rounded):
+
+        if (
+            not np.isfinite(value)
+            or value <= 0
+            or not np.isclose(value, rounded)
+        ):
             raise ValueError(
-                f"Invalid eval_round_freq in evaluations.npz: {logged_freq}"
+                f"Invalid eval_round_freq in evaluations.npz: "
+                f"{logged_freq}"
             )
+
         return rounded
 
-    rounds = np.asarray(rounds, dtype=float).reshape(-1)
+    rounds = np.asarray(
+        rounds,
+        dtype=float,
+    ).reshape(-1)
+
     diffs = np.diff(rounds)
-    positive_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+
+    positive_diffs = diffs[
+        np.isfinite(diffs)
+        & (diffs > 0)
+    ]
 
     if len(positive_diffs) == 0:
         raise ValueError(
-            "eval_round_freq is missing and it cannot be inferred from rounds."
+            "eval_round_freq is missing and it cannot be "
+            "inferred from rounds."
         )
 
-    value = float(np.median(positive_diffs))
-    rounded = int(round(value))
+    value = float(
+        np.median(
+            positive_diffs
+        )
+    )
 
-    if not np.isclose(value, rounded):
+    rounded = int(
+        round(value)
+    )
+
+    if not np.isclose(
+        value,
+        rounded,
+    ):
         raise ValueError(
-            "eval_round_freq is missing and the inferred round spacing is not an integer: "
+            "eval_round_freq is missing and the inferred "
+            "round spacing is not an integer: "
             f"{value}"
         )
 
     return rounded
 
 
-def select_exact_eval_rounds(data, x, curve, requested_eval_round_freq):
+def select_exact_eval_rounds(
+    data,
+    x,
+    curve,
+    requested_eval_round_freq,
+):
     """
     requested_eval_round_freq에 정확히 해당하는 실제 저장값만 선택한다.
 
     예:
-        seed A logged freq = 10
-        seed B logged freq = 40
-        requested freq     = 80
+        logged freq = 20
+        requested   = 40
 
-    -> 두 seed 모두 round 80, 160, 240, ... 의 실제 저장값만 사용한다.
+        -> 40, 80, 120, ... 만 사용
 
     중요:
-    - 보간(interpolation)은 절대 하지 않는다.
-    - requested freq가 logged freq의 정수배가 아니면 ValueError.
-      예: logged=30, requested=80 -> error
-    - 배수 관계여도 실제로 필요한 round가 파일에 빠져 있으면 ValueError.
+        interpolation은 사용하지 않는다.
     """
+    requested_eval_round_freq = normalize_eval_round_freq(
+        requested_eval_round_freq
+    )
 
-    requested_eval_round_freq = normalize_eval_round_freq(requested_eval_round_freq)
+    x = np.asarray(
+        x,
+        dtype=float,
+    ).reshape(-1)
 
-    x = np.asarray(x, dtype=float).reshape(-1)
-    curve = np.asarray(curve, dtype=float).reshape(-1)
+    curve = np.asarray(
+        curve,
+        dtype=float,
+    ).reshape(-1)
 
     if "rounds" not in data:
         raise ValueError(
-            "Strict eval_round_freq selection requires 'rounds' in evaluations.npz."
+            "Strict eval_round_freq selection requires "
+            "'rounds' in evaluations.npz."
         )
 
-    rounds = np.asarray(data["rounds"], dtype=float).reshape(-1)
+    rounds = np.asarray(
+        data["rounds"],
+        dtype=float,
+    ).reshape(-1)
 
-    usable_len = min(len(rounds), len(x), len(curve))
+    usable_len = min(
+        len(rounds),
+        len(x),
+        len(curve),
+    )
+
     rounds = rounds[:usable_len]
     x = x[:usable_len]
     curve = curve[:usable_len]
 
     if usable_len == 0:
-        raise ValueError("No evaluation data exists in evaluations.npz.")
-
-    if not np.all(np.isfinite(rounds)):
-        raise ValueError("rounds contains NaN or inf values.")
-
-    rounded_rounds = np.rint(rounds).astype(np.int64)
-    if not np.allclose(rounds, rounded_rounds):
-        raise ValueError("rounds must contain integer-valued round numbers.")
-
-    logged_eval_round_freq = get_logged_eval_round_freq(data, rounded_rounds)
-
-    if requested_eval_round_freq % logged_eval_round_freq != 0:
         raise ValueError(
-            "Requested eval_round_freq is incompatible with this seed: "
-            f"requested={requested_eval_round_freq}, "
-            f"logged={logged_eval_round_freq}. "
-            "The requested frequency must be an integer multiple of the logged frequency "
-            "because interpolation is disabled."
+            "No evaluation data exists in evaluations.npz."
         )
 
-    # 사용자가 요청한 정확한 round들만 선택한다.
-    exact_mask = (rounded_rounds % requested_eval_round_freq) == 0
-    selected_rounds = rounded_rounds[exact_mask]
-    selected_x = x[exact_mask]
-    selected_curve = curve[exact_mask]
+    if not np.all(
+        np.isfinite(rounds)
+    ):
+        raise ValueError(
+            "rounds contains NaN or inf values."
+        )
+
+    rounded_rounds = np.rint(
+        rounds
+    ).astype(
+        np.int64
+    )
+
+    if not np.allclose(
+        rounds,
+        rounded_rounds,
+    ):
+        raise ValueError(
+            "rounds must contain integer-valued round numbers."
+        )
+
+    logged_eval_round_freq = get_logged_eval_round_freq(
+        data,
+        rounded_rounds,
+    )
+
+    if (
+        requested_eval_round_freq
+        % logged_eval_round_freq
+        != 0
+    ):
+        raise ValueError(
+            "Requested eval_round_freq is incompatible "
+            "with this seed: "
+            f"requested={requested_eval_round_freq}, "
+            f"logged={logged_eval_round_freq}. "
+            "The requested frequency must be an integer "
+            "multiple of the logged frequency because "
+            "interpolation is disabled."
+        )
+
+    exact_mask = (
+        rounded_rounds
+        % requested_eval_round_freq
+    ) == 0
+
+    selected_rounds = rounded_rounds[
+        exact_mask
+    ]
+
+    selected_x = x[
+        exact_mask
+    ]
+
+    selected_curve = curve[
+        exact_mask
+    ]
 
     if len(selected_rounds) == 0:
         raise ValueError(
-            f"No rounds matching eval_round_freq={requested_eval_round_freq} exist "
-            f"in the logged range [{rounded_rounds.min()}, {rounded_rounds.max()}]."
+            f"No rounds matching "
+            f"eval_round_freq={requested_eval_round_freq} "
+            f"exist in the logged range "
+            f"[{rounded_rounds.min()}, "
+            f"{rounded_rounds.max()}]."
         )
 
-    # 파일이 커버하는 범위 안에서 존재해야 하는 requested round가 실제로 모두 있는지 검사한다.
-    # 마지막 round가 eval 주기와 무관한 강제 final evaluation이어도 문제없도록
-    # requested freq의 배수들만 expected로 만든다.
+    # -------------------------------------------------------------------------
+    # 필요한 exact evaluation round가 중간에 빠져 있는지 확인
+    # -------------------------------------------------------------------------
+
     first_expected = (
-        (int(rounded_rounds.min()) + requested_eval_round_freq - 1)
+        (
+            int(rounded_rounds.min())
+            + requested_eval_round_freq
+            - 1
+        )
         // requested_eval_round_freq
     ) * requested_eval_round_freq
+
     last_expected = (
-        int(rounded_rounds.max()) // requested_eval_round_freq
+        int(rounded_rounds.max())
+        // requested_eval_round_freq
     ) * requested_eval_round_freq
 
     if first_expected <= last_expected:
@@ -250,70 +394,110 @@ def select_exact_eval_rounds(data, x, curve, requested_eval_round_freq):
             requested_eval_round_freq,
             dtype=np.int64,
         )
-        missing_rounds = np.setdiff1d(expected_rounds, selected_rounds)
+
+        missing_rounds = np.setdiff1d(
+            expected_rounds,
+            selected_rounds,
+        )
 
         if len(missing_rounds) > 0:
-            preview = missing_rounds[:10].tolist()
-            more = " ..." if len(missing_rounds) > 10 else ""
-            raise ValueError(
-                f"Missing exact evaluation rounds for requested eval_round_freq="
-                f"{requested_eval_round_freq}: {preview}{more}. "
-                "Interpolation is disabled, so the curve cannot be constructed."
+            preview = missing_rounds[
+                :10
+            ].tolist()
+
+            more = (
+                " ..."
+                if len(missing_rounds) > 10
+                else ""
             )
 
-    return selected_x, selected_curve, selected_rounds, logged_eval_round_freq
+            raise ValueError(
+                f"Missing exact evaluation rounds for requested "
+                f"eval_round_freq={requested_eval_round_freq}: "
+                f"{preview}{more}. "
+                "Interpolation is disabled."
+            )
+
+    return (
+        selected_x,
+        selected_curve,
+        selected_rounds,
+        logged_eval_round_freq,
+    )
 
 
-def load_single_curve(npz_path, metric="nominal", eval_round_freq=None):
+# =============================================================================
+# Load one seed curve
+# =============================================================================
+
+def load_single_curve(
+    npz_path,
+    metric="nominal",
+    eval_round_freq=None,
+):
     """
-    한 seed의 evaluations.npz에서 round별 metric mean curve를 가져온다.
+    한 seed의 evaluations.npz에서 round별 metric curve를 가져온다.
 
     metric:
-        - nominal
-        - local_mean
-        - local_min
-
-    eval_round_freq:
-        - None: 파일에 저장된 모든 evaluation point 사용
-        - 정수: 해당 round 주기의 실제 저장값만 사용
-          예: 80 -> rounds 80, 160, 240, ... 만 사용
-
-    return:
-        x: timesteps 기준 x축
-        mean_curve: 선택된 metric curve
-        rounds: 선택된 실제 round 번호
-        logged_eval_round_freq: 해당 seed의 원래 evaluation 저장 주기
+        nominal
+        local_mean
+        local_min
     """
+    with np.load(
+        npz_path,
+        allow_pickle=True,
+    ) as data:
 
-    with np.load(npz_path, allow_pickle=True) as data:
         if metric == "nominal":
-            mean_all = np.array(data["nominal_mean"], dtype=float)
+            mean_all = np.array(
+                data["nominal_mean"],
+                dtype=float,
+            )
 
             if mean_all.ndim == 2:
-                mean_curve = np.mean(mean_all, axis=1)
+                mean_curve = np.mean(
+                    mean_all,
+                    axis=1,
+                )
             else:
                 mean_curve = mean_all
 
         elif metric == "local_mean":
-            mean_all = np.array(data["local_mean"], dtype=float)
+            mean_all = np.array(
+                data["local_mean"],
+                dtype=float,
+            )
 
             if mean_all.ndim == 2:
-                mean_curve = np.mean(mean_all, axis=1)
+                mean_curve = np.mean(
+                    mean_all,
+                    axis=1,
+                )
             else:
                 mean_curve = mean_all
 
         elif metric == "local_min":
-            mean_all = np.array(data["local_mean"], dtype=float)
+            mean_all = np.array(
+                data["local_mean"],
+                dtype=float,
+            )
 
             if mean_all.ndim == 2:
-                mean_curve = np.min(mean_all, axis=1)
+                mean_curve = np.min(
+                    mean_all,
+                    axis=1,
+                )
             else:
                 mean_curve = mean_all
 
         else:
-            raise ValueError(f"Unknown metric: {metric}")
+            raise ValueError(
+                f"Unknown metric: {metric}"
+            )
 
-        num_rounds = len(mean_curve)
+        num_rounds = len(
+            mean_curve
+        )
 
         x = make_timesteps_from_npz(
             data=data,
@@ -322,17 +506,32 @@ def load_single_curve(npz_path, metric="nominal", eval_round_freq=None):
         )
 
         if "rounds" in data:
-            rounds = np.asarray(data["rounds"], dtype=float)[:num_rounds]
+            rounds = np.asarray(
+                data["rounds"],
+                dtype=float,
+            )[:num_rounds]
         else:
-            rounds = np.arange(num_rounds, dtype=float)
+            rounds = np.arange(
+                num_rounds,
+                dtype=float,
+            )
 
         if eval_round_freq is None:
             logged_eval_round_freq = (
-                get_logged_eval_round_freq(data, rounds)
+                get_logged_eval_round_freq(
+                    data,
+                    rounds,
+                )
                 if "rounds" in data
                 else None
             )
-            return x, mean_curve, rounds, logged_eval_round_freq
+
+            return (
+                x,
+                mean_curve,
+                rounds,
+                logged_eval_round_freq,
+            )
 
         return select_exact_eval_rounds(
             data=data,
@@ -342,65 +541,184 @@ def load_single_curve(npz_path, metric="nominal", eval_round_freq=None):
         )
 
 
-def align_seed_curves_by_round_exact(x_list, curve_list, rounds_list):
+# =============================================================================
+# Align seeds using exact rounds
+# =============================================================================
+
+def align_seed_curves_by_round_exact(
+    x_list,
+    curve_list,
+    rounds_list,
+):
     """
     여러 seed를 실제 round 번호 기준으로 정확히 정렬한다.
 
-    - 보간하지 않는다.
-    - 모든 seed에 실제로 존재하는 공통 round만 사용한다.
-    - 같은 round가 seed마다 다른 timestep에 대응하면 ValueError를 발생시킨다.
+    - interpolation 없음
+    - 모든 seed에 실제 존재하는 common round만 사용
     """
-
-    if not (len(x_list) == len(curve_list) == len(rounds_list)):
-        raise ValueError("x_list, curve_list, and rounds_list must have the same length.")
+    if not (
+        len(x_list)
+        == len(curve_list)
+        == len(rounds_list)
+    ):
+        raise ValueError(
+            "x_list, curve_list, and rounds_list "
+            "must have the same length."
+        )
 
     if len(rounds_list) == 0:
-        raise ValueError("No seed curves to align.")
+        raise ValueError(
+            "No seed curves to align."
+        )
 
     normalized = []
-    for x, curve, rounds in zip(x_list, curve_list, rounds_list):
-        x = np.asarray(x, dtype=float).reshape(-1)
-        curve = np.asarray(curve, dtype=float).reshape(-1)
-        rounds = np.asarray(rounds, dtype=np.int64).reshape(-1)
 
-        usable_len = min(len(x), len(curve), len(rounds))
+    for (
+        x,
+        curve,
+        rounds,
+    ) in zip(
+        x_list,
+        curve_list,
+        rounds_list,
+    ):
+        x = np.asarray(
+            x,
+            dtype=float,
+        ).reshape(-1)
+
+        curve = np.asarray(
+            curve,
+            dtype=float,
+        ).reshape(-1)
+
+        rounds = np.asarray(
+            rounds,
+            dtype=np.int64,
+        ).reshape(-1)
+
+        usable_len = min(
+            len(x),
+            len(curve),
+            len(rounds),
+        )
+
         x = x[:usable_len]
         curve = curve[:usable_len]
         rounds = rounds[:usable_len]
 
-        if len(np.unique(rounds)) != len(rounds):
-            raise ValueError("Duplicate round values exist in a seed after filtering.")
+        if (
+            len(np.unique(rounds))
+            != len(rounds)
+        ):
+            raise ValueError(
+                "Duplicate round values exist in a seed "
+                "after filtering."
+            )
 
-        order = np.argsort(rounds, kind="stable")
-        normalized.append((x[order], curve[order], rounds[order]))
+        order = np.argsort(
+            rounds,
+            kind="stable",
+        )
 
-    common_rounds = normalized[0][2]
-    for _, _, rounds in normalized[1:]:
-        common_rounds = np.intersect1d(common_rounds, rounds, assume_unique=True)
+        normalized.append(
+            (
+                x[order],
+                curve[order],
+                rounds[order],
+            )
+        )
+
+    common_rounds = normalized[
+        0
+    ][2]
+
+    for (
+        _,
+        _,
+        rounds,
+    ) in normalized[1:]:
+        common_rounds = np.intersect1d(
+            common_rounds,
+            rounds,
+            assume_unique=True,
+        )
 
     if len(common_rounds) == 0:
-        raise ValueError("No exact common evaluation rounds exist across seeds.")
+        raise ValueError(
+            "No exact common evaluation rounds exist "
+            "across seeds."
+        )
 
     aligned_x = []
     aligned_curves = []
 
-    for x, curve, rounds in normalized:
-        index_by_round = {int(r): i for i, r in enumerate(rounds)}
-        indices = np.array([index_by_round[int(r)] for r in common_rounds], dtype=int)
-        aligned_x.append(x[indices])
-        aligned_curves.append(curve[indices])
+    for (
+        x,
+        curve,
+        rounds,
+    ) in normalized:
 
-    reference_x = aligned_x[0]
-    for seed_idx, seed_x in enumerate(aligned_x[1:], start=2):
-        if not np.allclose(seed_x, reference_x, rtol=1e-9, atol=1e-9, equal_nan=False):
+        index_by_round = {
+            int(r): i
+            for i, r in enumerate(
+                rounds
+            )
+        }
+
+        indices = np.array(
+            [
+                index_by_round[int(r)]
+                for r in common_rounds
+            ],
+            dtype=int,
+        )
+
+        aligned_x.append(
+            x[indices]
+        )
+
+        aligned_curves.append(
+            curve[indices]
+        )
+
+    reference_x = aligned_x[
+        0
+    ]
+
+    for (
+        seed_idx,
+        seed_x,
+    ) in enumerate(
+        aligned_x[1:],
+        start=2,
+    ):
+        if not np.allclose(
+            seed_x,
+            reference_x,
+            rtol=1e-9,
+            atol=1e-9,
+            equal_nan=False,
+        ):
             raise ValueError(
-                "The same evaluation rounds map to different timestep x-values across seeds. "
+                "The same evaluation rounds map to different "
+                "timestep x-values across seeds. "
                 f"Mismatch detected at seed index {seed_idx}. "
                 "Check local_steps, num_clients, or saved timesteps."
             )
 
-    return reference_x, np.vstack(aligned_curves), common_rounds
+    return (
+        reference_x,
+        np.vstack(
+            aligned_curves
+        ),
+        common_rounds,
+    )
 
+
+# =============================================================================
+# Collect seeds
+# =============================================================================
 
 def collect_seed_curves(
     algo_id,
@@ -413,26 +731,28 @@ def collect_seed_curves(
     """
     여러 seed의 mean curve를 모은다.
 
-    eval_round_freq를 지정하면 모든 seed에서 그 주기의 실제 round만 사용한다.
-    예: eval_round_freq=80 -> 80, 160, 240, ...
-
-    seed의 원래 eval_round_freq가 요청값을 정확히 만들 수 없거나,
-    필요한 round가 실제 파일에 없으면 ValueError를 발생시킨다.
-    보간은 사용하지 않는다.
-
     expected path:
-        {result_root_path}/{algo_id}/{env_id}_{seed}/evaluations.npz
-    """
 
-    eval_round_freq = normalize_eval_round_freq(eval_round_freq)
+        {result_root_path}/
+            {algo_id}/
+                {env_id}_{seed}/
+                    evaluations.npz
+    """
+    eval_round_freq = normalize_eval_round_freq(
+        eval_round_freq
+    )
 
     x_list = []
     curve_list = []
     rounds_list = []
+
     valid_seeds = []
     logged_freqs = []
 
-    for seed in range(1, num_trials + 1):
+    for seed in range(
+        1,
+        num_trials + 1,
+    ):
         npz_path = os.path.join(
             result_root_path,
             algo_id,
@@ -440,163 +760,278 @@ def collect_seed_curves(
             "evaluations.npz",
         )
 
-        if not os.path.exists(npz_path):
-            print(f"[Missing] seed {seed}: {npz_path}")
+        if not os.path.exists(
+            npz_path
+        ):
+            print(
+                f"[Missing] seed {seed}: "
+                f"{npz_path}"
+            )
             continue
 
         try:
-            x, mean_curve, rounds, logged_freq = load_single_curve(
+            (
+                x,
+                mean_curve,
+                rounds,
+                logged_freq,
+            ) = load_single_curve(
                 npz_path=npz_path,
                 metric=metric,
                 eval_round_freq=eval_round_freq,
             )
+
         except ValueError as e:
-            # eval_round_freq 불일치/누락은 조용히 seed를 건너뛰면 안 된다.
-            # 사용자가 잘못된 평균 plot을 보지 않도록 즉시 중단한다.
             raise ValueError(
-                f"Failed to load seed {seed} strictly: {npz_path}\n{e}"
+                f"Failed to load seed {seed} strictly: "
+                f"{npz_path}\n{e}"
             ) from e
+
         except Exception as e:
-            print(f"[Error] seed {seed}: {npz_path}")
-            print(f"        {e}")
+            print(
+                f"[Error] seed {seed}: "
+                f"{npz_path}"
+            )
+            print(
+                f"        {e}"
+            )
             continue
 
-        x_list.append(x)
-        curve_list.append(mean_curve)
-        rounds_list.append(np.asarray(rounds, dtype=np.int64))
-        valid_seeds.append(seed)
-        logged_freqs.append(logged_freq)
+        x_list.append(
+            x
+        )
+
+        curve_list.append(
+            mean_curve
+        )
+
+        rounds_list.append(
+            np.asarray(
+                rounds,
+                dtype=np.int64,
+            )
+        )
+
+        valid_seeds.append(
+            seed
+        )
+
+        logged_freqs.append(
+            logged_freq
+        )
 
     if len(curve_list) == 0:
-        return None, None, []
+        return (
+            None,
+            None,
+            [],
+        )
 
-    x, seed_curves, common_rounds = align_seed_curves_by_round_exact(
+    (
+        _,
+        seed_curves,
+        common_rounds,
+    ) = align_seed_curves_by_round_exact(
         x_list=x_list,
         curve_list=curve_list,
         rounds_list=rounds_list,
     )
 
-    x = common_rounds.astype(float)
+    # x-axis는 Global Communication Rounds 사용
+    x = common_rounds.astype(
+        float
+    )
 
     freq_info = ", ".join(
-        f"seed {seed}: {freq}" for seed, freq in zip(valid_seeds, logged_freqs)
+        f"seed {seed}: {freq}"
+        for (
+            seed,
+            freq,
+        ) in zip(
+            valid_seeds,
+            logged_freqs,
+        )
     )
-    requested_text = "all" if eval_round_freq is None else str(eval_round_freq)
+
+    requested_text = (
+        "all"
+        if eval_round_freq is None
+        else str(eval_round_freq)
+    )
 
     print(
-        f"[Exact Eval Round] requested={requested_text}; "
-        f"logged=({freq_info}); common points={len(common_rounds)}; "
-        f"round range={common_rounds[0]}..{common_rounds[-1]}"
+        f"[Exact Eval Round] "
+        f"requested={requested_text}; "
+        f"logged=({freq_info}); "
+        f"common points={len(common_rounds)}; "
+        f"round range="
+        f"{common_rounds[0]}.."
+        f"{common_rounds[-1]}"
     )
 
-    return x, seed_curves, valid_seeds
+    return (
+        x,
+        seed_curves,
+        valid_seeds,
+    )
 
+
+# =============================================================================
+# Extra path args
+# =============================================================================
 
 def normalize_extra_args(extra_args=None):
     """
-    추가 하위 폴더 인자를 항상 tuple 형태로 정규화한다.
-
-    예:
-        None        -> ()
-        []          -> ()
-        1024        -> (1024,)
-        [1024, 64]  -> (1024, 64)
-        (1024, 64)  -> (1024, 64)
+    추가 하위 폴더 인자를 tuple 형태로 정규화한다.
     """
-
     if extra_args is None:
         return ()
 
-    if isinstance(extra_args, (list, tuple)):
-        return tuple(extra_args)
+    if isinstance(
+        extra_args,
+        (list, tuple),
+    ):
+        return tuple(
+            extra_args
+        )
 
-    return (extra_args,)
+    return (
+        extra_args,
+    )
 
 
 def normalize_extra_arg_sets(extra_arg_sets=None):
     """
-    여러 실험 설정을 항상 tuple의 list 형태로 정규화한다.
-
-    예:
-        None 또는 []
-            -> [()]
-            # 추가 폴더 없이 실행
-
-        [1024, 2048]
-            -> [(1024,), (2048,)]
-            # 기존 first_arg_list처럼 1개 인자씩 여러 번 실행
-
-        [(1024, 64), (2048, 128)]
-            -> [(1024, 64), (2048, 128)]
-            # first_arg, second_arg처럼 여러 인자를 묶어서 실행
-
-        [(), (1024,), (1024, 64)]
-            -> [(), (1024,), (1024, 64)]
-            # 인자 없음/1개/여러 개를 같이 실행
+    여러 extra_args 조합을 정규화한다.
     """
+    if (
+        extra_arg_sets is None
+        or len(extra_arg_sets) == 0
+    ):
+        return [
+            ()
+        ]
 
-    if extra_arg_sets is None or len(extra_arg_sets) == 0:
-        return [()]
+    return [
+        normalize_extra_args(
+            extra_args
+        )
+        for extra_args in extra_arg_sets
+    ]
 
-    return [normalize_extra_args(extra_args) for extra_args in extra_arg_sets]
 
-
-def append_extra_args_to_path(root_path, extra_args=None):
-    """extra_args가 있으면 root_path 아래 subdir로 붙이고, 없으면 root_path 그대로 반환한다."""
-
-    extra_args = normalize_extra_args(extra_args)
+def append_extra_args_to_path(
+    root_path,
+    extra_args=None,
+):
+    """
+    extra_args가 있으면 root_path 아래에 붙인다.
+    """
+    extra_args = normalize_extra_args(
+        extra_args
+    )
 
     if len(extra_args) == 0:
         return root_path
 
-    return os.path.join(root_path, *[str(arg) for arg in extra_args])
+    return os.path.join(
+        root_path,
+        *[
+            str(arg)
+            for arg in extra_args
+        ],
+    )
 
 
-def make_extra_args_suffix(extra_args=None):
-    """파일명에 붙일 suffix를 만든다. extra_args가 없으면 빈 문자열을 반환한다."""
-
-    extra_args = normalize_extra_args(extra_args)
+def make_extra_args_suffix(
+    extra_args=None,
+):
+    """
+    파일명에 붙일 extra_args suffix.
+    """
+    extra_args = normalize_extra_args(
+        extra_args
+    )
 
     if len(extra_args) == 0:
         return ""
 
-    return "_" + "_".join(str(arg) for arg in extra_args)
+    return (
+        "_"
+        + "_".join(
+            str(arg)
+            for arg in extra_args
+        )
+    )
 
+
+# =============================================================================
+# Algorithm config
+# =============================================================================
 
 def unpack_algo_config(config):
     """
-    algo_config_list의 한 항목을 표준 형태로 변환한다.
-
     지원 형식:
+
         (algo_id, result_root_path)
+
         (algo_id, result_root_path, plot_label)
-
-    plot_label을 직접 지정하면 같은 fed_ampo_ppo를 여러 개 넣어도
-    legend에서 각각 다른 실험으로 명확하게 구분할 수 있다.
     """
-
     if len(config) == 2:
-        algo_id, result_root_path = config
+        (
+            algo_id,
+            result_root_path,
+        ) = config
+
         plot_label = None
+
     elif len(config) == 3:
-        algo_id, result_root_path, plot_label = config
+        (
+            algo_id,
+            result_root_path,
+            plot_label,
+        ) = config
+
     else:
         raise ValueError(
-            "Each algo config must be (algo_id, path) or "
+            "Each algo config must be "
+            "(algo_id, path) or "
             "(algo_id, path, plot_label)."
         )
 
-    return algo_id, result_root_path, plot_label
+    return (
+        algo_id,
+        result_root_path,
+        plot_label,
+    )
 
 
-def count_algo_ids(algo_config_list):
-    """algo_config_list 안에서 algo_id가 몇 번 등장하는지 센다."""
-
+def count_algo_ids(
+    algo_config_list,
+):
+    """
+    algo_config_list에서 algo_id 등장 횟수 계산.
+    """
     algo_id_counts = {}
 
     for config in algo_config_list:
-        algo_id, _, _ = unpack_algo_config(config)
-        algo_id_counts[algo_id] = algo_id_counts.get(algo_id, 0) + 1
+        (
+            algo_id,
+            _,
+            _,
+        ) = unpack_algo_config(
+            config
+        )
+
+        algo_id_counts[
+            algo_id
+        ] = (
+            algo_id_counts.get(
+                algo_id,
+                0,
+            )
+            + 1
+        )
 
     return algo_id_counts
 
@@ -609,209 +1044,334 @@ def make_unique_plot_label(
     custom_plot_label=None,
 ):
     """
-    논문 그림용 legend label을 만든다.
-
-    - custom_plot_label이 있으면 그것을 우선 사용한다.
-    - 같은 label이 이미 사용되었으면 (2), (3), ... 을 자동으로 붙인다.
-      따라서 같은 AMPO 알고리즘을 여러 설정으로 넣어도 legend에서 사라지지 않는다.
+    custom plot label이 있으면 그것을 우선 사용한다.
     """
-
-    normalized_path = os.path.normpath(result_root_path).replace("\\", "/").lower()
-
     if custom_plot_label is not None:
-        base_label = str(custom_plot_label)
-    elif algo_id == "ppo_avg":
-        # ppo_avg 아래의 full_local 실험은 server communication/aggregation 없이
-        # local PPO만 수행하는 baseline이므로 일반 "PPO"로 표시한다.
-        is_full_local_ppo = (
-            "/ppo_avg/" in normalized_path
-            and normalized_path.endswith("/full_local")
+        base_label = str(
+            custom_plot_label
         )
-        base_label = "PPO" if is_full_local_ppo else "PPOAvg"
+
+    elif algo_id == "ppo_avg":
+        base_label = "PPOAvg"
+
     elif algo_id == "fed_ampo_ppo":
-        if "/uniform" in normalized_path:
-            base_label = "AMPO-PPO(U)"
-        elif "/adaptive" in normalized_path:
-            base_label = "AMPO-PPO(A)"
-        else:
-            base_label = "AMPO-PPO"
+        base_label = "AMPO-PPO"
+
     elif algo_id == "fed_svrpg_m":
         base_label = "FedSVRPG-M-PPO"
+
     else:
         base_label = algo_id
 
-    # 동일 label이 이미 있으면 자동으로 번호를 붙여 모두 legend에 남긴다.
     if base_label not in used_plot_labels:
         return base_label
 
     duplicate_idx = 2
-    while f"{base_label} ({duplicate_idx})" in used_plot_labels:
+
+    while (
+        f"{base_label} ({duplicate_idx})"
+        in used_plot_labels
+    ):
         duplicate_idx += 1
 
-    return f"{base_label} ({duplicate_idx})"
+    return (
+        f"{base_label} ({duplicate_idx})"
+    )
 
 
-def normalize_window_size(window_size=None):
-    """
-    plot smoothing에 사용할 window 크기를 정규화한다.
+# =============================================================================
+# Smoothing
+# =============================================================================
 
-    window_size가 None 또는 1 이하이면 smoothing을 적용하지 않는다.
-    """
-
+def normalize_window_size(
+    window_size=None,
+):
     if window_size is None:
         return 1
 
-    window_size = int(window_size)
+    window_size = int(
+        window_size
+    )
 
     if window_size < 1:
-        raise ValueError(f"window_size must be >= 1, but got {window_size}")
+        raise ValueError(
+            f"window_size must be >= 1, "
+            f"but got {window_size}"
+        )
 
     return window_size
 
 
-def make_window_suffix(window_size=None):
-    """window smoothing을 적용한 경우 파일명에 붙일 suffix를 만든다."""
-
-    window_size = normalize_window_size(window_size)
+def make_window_suffix(
+    window_size=None,
+):
+    window_size = normalize_window_size(
+        window_size
+    )
 
     if window_size <= 1:
         return ""
 
-    return f"_window{window_size}"
+    return (
+        f"_window{window_size}"
+    )
 
 
-def smooth_curve_with_window(curve, window_size=None):
+def smooth_curve_with_window(
+    curve,
+    window_size=None,
+):
     """
-    1D curve에 centered moving-average window를 적용한다.
-
-    특징:
-    - window_size <= 1이면 원본 curve를 그대로 반환한다.
-    - 출력 길이는 입력 길이와 동일하게 유지한다.
-    - 양 끝 구간에서는 가능한 범위 안의 값만 사용한다.
-    - NaN이 섞여 있으면 해당 window 안의 NaN을 제외하고 평균을 낸다.
+    centered moving average.
     """
+    curve = np.asarray(
+        curve,
+        dtype=float,
+    )
 
-    curve = np.asarray(curve, dtype=float)
-    window_size = normalize_window_size(window_size)
+    window_size = normalize_window_size(
+        window_size
+    )
 
-    if window_size <= 1 or len(curve) == 0:
+    if (
+        window_size <= 1
+        or len(curve) == 0
+    ):
         return curve.copy()
 
-    window_size = min(window_size, len(curve))
-    left = window_size // 2
-    right = window_size - left - 1
+    window_size = min(
+        window_size,
+        len(curve),
+    )
 
-    smoothed_curve = np.empty_like(curve, dtype=float)
+    left = (
+        window_size // 2
+    )
 
-    for idx in range(len(curve)):
-        start = max(0, idx - left)
-        end = min(len(curve), idx + right + 1)
-        window_values = curve[start:end]
+    right = (
+        window_size
+        - left
+        - 1
+    )
 
-        if np.all(np.isnan(window_values)):
-            smoothed_curve[idx] = np.nan
+    smoothed_curve = np.empty_like(
+        curve,
+        dtype=float,
+    )
+
+    for idx in range(
+        len(curve)
+    ):
+        start = max(
+            0,
+            idx - left,
+        )
+
+        end = min(
+            len(curve),
+            idx + right + 1,
+        )
+
+        window_values = curve[
+            start:end
+        ]
+
+        if np.all(
+            np.isnan(
+                window_values
+            )
+        ):
+            smoothed_curve[
+                idx
+            ] = np.nan
+
         else:
-            smoothed_curve[idx] = np.nanmean(window_values)
+            smoothed_curve[
+                idx
+            ] = np.nanmean(
+                window_values
+            )
 
     return smoothed_curve
 
 
-def smooth_seed_curves_with_window(seed_curves, window_size=None):
-    """
-    seed_curves 전체에 window smoothing을 적용한다.
+def smooth_seed_curves_with_window(
+    seed_curves,
+    window_size=None,
+):
+    seed_curves = np.asarray(
+        seed_curves,
+        dtype=float,
+    )
 
-    seed_curves shape:
-        (num_seeds, num_rounds)
-    """
-
-    window_size = normalize_window_size(window_size)
-    seed_curves = np.asarray(seed_curves, dtype=float)
+    window_size = normalize_window_size(
+        window_size
+    )
 
     if window_size <= 1:
         return seed_curves.copy()
 
     return np.array(
-        [smooth_curve_with_window(curve, window_size) for curve in seed_curves],
+        [
+            smooth_curve_with_window(
+                curve,
+                window_size,
+            )
+            for curve in seed_curves
+        ],
         dtype=float,
     )
 
 
-def plot_seed_average_curve(
-    x,
-    seed_curves,
-    algo_id,
-    env_id,
-    metric,
-    save_dir,
-    filename_prefix,
-    window_size=None,
+# =============================================================================
+# Common shortest horizon
+# =============================================================================
+
+def truncate_algo_data_to_shortest_horizon(
+    algo_data_list,
 ):
     """
-    시드 평균 curve와 시드 std band를 함께 그린다.
+    perturbation strength별 학습 길이가 다르면,
+    가장 짧은 curve의 마지막 communication round까지만 사용한다.
 
-    주의:
-    - 여기서 std는 nominal_std/local_std를 쓰는 것이 아니다.
-    - 각 seed에서 얻은 'mean curve'를 기준으로
-      seed 방향으로 std를 계산한다.
+    IMPORTANT:
+        smoothing 전에 truncate한다.
     """
+    if len(algo_data_list) == 0:
+        return (
+            [],
+            None,
+        )
 
-    os.makedirs(save_dir, exist_ok=True)
+    normalized = []
+    final_x_values = []
 
-    window_size = normalize_window_size(window_size)
-    window_suffix = make_window_suffix(window_size)
-
-    # window smoothing은 seed별 curve에 먼저 적용한다.
-    # 이후 smoothed seed curves를 기준으로 seed 평균 / seed std를 계산한다.
-    plot_seed_curves = smooth_seed_curves_with_window(seed_curves, window_size)
-    avg_curve = np.nanmean(plot_seed_curves, axis=0)
-    std_curve = np.nanstd(plot_seed_curves, axis=0)
-
-    plt.figure(figsize=(10, 6))
-
-    if window_size > 1:
-        line_label = f"seed average (window={window_size})"
-    else:
-        line_label = "seed average"
-
-    # seed average line
-    plt.plot(
+    for (
+        plot_label,
         x,
-        avg_curve,
-        linewidth=2.5,
-        label=line_label,
+        seed_curves,
+    ) in algo_data_list:
+
+        x = np.asarray(
+            x,
+            dtype=float,
+        ).reshape(-1)
+
+        seed_curves = np.asarray(
+            seed_curves,
+            dtype=float,
+        )
+
+        if seed_curves.ndim != 2:
+            raise ValueError(
+                f"{plot_label}: "
+                f"seed_curves must be 2D, "
+                f"got {seed_curves.shape}"
+            )
+
+        usable_len = min(
+            len(x),
+            seed_curves.shape[1],
+        )
+
+        x = x[:usable_len]
+        seed_curves = seed_curves[
+            :,
+            :usable_len,
+        ]
+
+        if len(x) == 0:
+            raise ValueError(
+                f"{plot_label}: "
+                "no usable data."
+            )
+
+        final_x_values.append(
+            float(
+                x[-1]
+            )
+        )
+
+        normalized.append(
+            (
+                plot_label,
+                x,
+                seed_curves,
+            )
+        )
+
+    common_x_max = float(
+        np.min(
+            final_x_values
+        )
     )
 
-    # seed std band
-    plt.fill_between(
+    truncated = []
+
+    for (
+        plot_label,
         x,
-        avg_curve - std_curve,
-        avg_curve + std_curve,
-        alpha=0.25,
-        label="± seed std",
+        seed_curves,
+    ) in normalized:
+
+        keep_mask = (
+            x
+            <= common_x_max
+            + 1e-9
+        )
+
+        truncated_x = x[
+            keep_mask
+        ]
+
+        truncated_seed_curves = seed_curves[
+            :,
+            keep_mask,
+        ]
+
+        truncated.append(
+            (
+                plot_label,
+                truncated_x,
+                truncated_seed_curves,
+            )
+        )
+
+        print(
+            f"[Common Horizon] "
+            f"{plot_label}: "
+            f"original_end={x[-1]:g}, "
+            f"used_end={truncated_x[-1]:g}, "
+            f"points={len(truncated_x)}"
+        )
+
+    print(
+        "[Common Horizon] "
+        "All perturbation-strength curves are restricted to "
+        f"round <= {common_x_max:g}"
     )
 
-    # plt.xlabel("Timesteps")
-    plt.xlabel("Global Communication Rounds")
-    plt.ylabel("Return")
-    plt.grid(True, alpha=0.3)
-    plt.legend(frameon=False)
-    # Reduce outer whitespace more aggressively for paper figures.
-    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
-
-    save_file = os.path.join(
-        save_dir,
-        f"{filename_prefix}_{metric}_learning_curve.png",
+    return (
+        truncated,
+        common_x_max,
     )
 
-    plt.savefig(
-        save_file,
-        dpi=200,
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-    plt.close()
 
-    print(f"[Saved] {save_file}")
+# =============================================================================
+# Plot
+# =============================================================================
+
+def get_metric_ylabel(metric):
+    labels = {
+        "nominal": "Nominal Return",
+        "local_mean": "Average Local Return",
+        "local_min": "Worst-Case Local Return",
+    }
+
+    return labels.get(
+        metric,
+        "Return",
+    )
 
 
 def plot_multiple_algos(
@@ -823,31 +1383,61 @@ def plot_multiple_algos(
     window_size=None,
 ):
     """
-    여러 알고리즘의 seed average curve를 한 plot에 그린다.
-
-    algo_data_list:
-        [(plot_label, x, seed_curves), ...]
-
-    주의:
-    - dict를 쓰면 같은 algo_id가 여러 번 있을 때 key가 중복되어 덮어써진다.
-    - 그래서 list를 사용해 같은 알고리즘의 여러 설정도 모두 plot한다.
+    서로 다른 perturbation strength의 seed average curve를 비교한다.
     """
+    os.makedirs(
+        save_dir,
+        exist_ok=True,
+    )
 
-    os.makedirs(save_dir, exist_ok=True)
+    window_size = normalize_window_size(
+        window_size
+    )
 
-    window_size = normalize_window_size(window_size)
-    window_suffix = make_window_suffix(window_size)
+    window_suffix = make_window_suffix(
+        window_size
+    )
 
-    plt.figure(figsize=(10, 6))
+    # -------------------------------------------------------------------------
+    # 가장 짧은 perturbation-strength run까지만 비교
+    #
+    # 반드시 smoothing 전에 수행한다.
+    # -------------------------------------------------------------------------
 
-    for plot_label, x, seed_curves in algo_data_list:
-        # window smoothing은 seed별 curve에 먼저 적용한다.
-        # 이후 smoothed seed curves를 기준으로 seed 평균 / seed std를 계산한다.
-        plot_seed_curves = smooth_seed_curves_with_window(seed_curves, window_size)
-        avg_curve = np.nanmean(plot_seed_curves, axis=0)
-        std_curve = np.nanstd(plot_seed_curves, axis=0)
+    (
+        algo_data_list,
+        common_x_max,
+    ) = truncate_algo_data_to_shortest_horizon(
+        algo_data_list
+    )
 
-        # seed average line
+    plt.figure(
+        figsize=(10, 6)
+    )
+
+    for (
+        plot_label,
+        x,
+        seed_curves,
+    ) in algo_data_list:
+
+        plot_seed_curves = (
+            smooth_seed_curves_with_window(
+                seed_curves,
+                window_size,
+            )
+        )
+
+        avg_curve = np.nanmean(
+            plot_seed_curves,
+            axis=0,
+        )
+
+        std_curve = np.nanstd(
+            plot_seed_curves,
+            axis=0,
+        )
+
         plt.plot(
             x,
             avg_curve,
@@ -855,7 +1445,6 @@ def plot_multiple_algos(
             label=plot_label,
         )
 
-        # seed std band
         plt.fill_between(
             x,
             avg_curve - std_curve,
@@ -863,120 +1452,95 @@ def plot_multiple_algos(
             alpha=0.15,
         )
 
-    # plt.xlabel("Timesteps")
-    plt.xlabel("Global Communication Rounds")
-    plt.ylabel("Return")
+    if common_x_max is not None:
+        plt.xlim(
+            right=common_x_max
+        )
 
-    plt.grid(True, alpha=0.3)
+    plt.xlabel(
+        "Global Communication Rounds"
+    )
 
-    # 동일 알고리즘의 여러 하이퍼파라미터 곡선은 모두 유지하되,
-    # legend에는 같은 이름을 한 번만 표시한다.
-    handles, labels = plt.gca().get_legend_handles_labels()
+    plt.ylabel(
+        get_metric_ylabel(
+            metric
+        )
+    )
+
+    plt.grid(
+        True,
+        alpha=0.3,
+    )
+
+    handles, labels = (
+        plt.gca()
+        .get_legend_handles_labels()
+    )
+
     unique_legend = {}
-    for handle, label in zip(handles, labels):
+
+    for (
+        handle,
+        label,
+    ) in zip(
+        handles,
+        labels,
+    ):
         if label not in unique_legend:
-            unique_legend[label] = handle
+            unique_legend[
+                label
+            ] = handle
 
     plt.legend(
         unique_legend.values(),
         unique_legend.keys(),
+        title="Perturbation Strength",
         frameon=False,
     )
-    # Reduce outer whitespace more aggressively for paper figures.
-    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
+
+    plt.tight_layout(
+        pad=0.15,
+        h_pad=0.15,
+        w_pad=0.15,
+    )
 
     save_file = os.path.join(
         save_dir,
-        f"{filename_prefix}_{metric}_learning_curve.png",
+        (
+            f"{filename_prefix}_"
+            f"{metric}_learning_curve"
+            f"{window_suffix}.png"
+        ),
     )
 
     plt.savefig(
         save_file,
-        dpi=300,
+        dpi=200,
         bbox_inches="tight",
         pad_inches=0.02,
     )
+
     plt.close()
 
-    print(f"[Saved] {save_file}")
+    print(
+        f"[Saved] {save_file}"
+    )
 
 
-def generate_learning_plots(
-    algo_id,
-    result_root_path,
-    plot_root_path,
-    env_list,
-    num_trials,
-    metric_list,
-    extra_args=None,
-    window_size=None,
-    eval_round_freq=None,
-):
-    """
-    env별, metric별 learning curve를 저장한다.
-
-    result_root_path:
-        evaluations.npz가 저장된 root
-
-    plot_root_path:
-        plot을 저장할 root
-
-    extra_args:
-        예: [1024]
-        result_root_path 아래 추가 subdir로 붙고,
-        파일 이름에도 붙는다.
-    """
-
-    extra_args = normalize_extra_args(extra_args)
-
-    # 예:
-    #   extra_args=[]          -> result_root_path
-    #   extra_args=[1024]      -> result_root_path/1024
-    #   extra_args=[1024, 64]  -> result_root_path/1024/64
-    result_save_root = append_extra_args_to_path(result_root_path, extra_args)
-
-    # 파일 이름 suffix
-    suffix = make_extra_args_suffix(extra_args)
-    filename_prefix = f"{algo_id}{suffix}"
-
-    for env_id in env_list:
-        save_dir = os.path.join(plot_root_path, env_id)
-
-        for metric in metric_list:
-            x, seed_curves, valid_seeds = collect_seed_curves(
-                algo_id=algo_id,
-                env_id=env_id,
-                result_root_path=result_save_root,
-                metric=metric,
-                num_trials=num_trials,
-                eval_round_freq=eval_round_freq,
-            )
-
-            if seed_curves is None:
-                print(f"[Skip] No valid data: {algo_id}, {env_id}, {metric}")
-                continue
-
-            print(
-                f"[Info] {algo_id}, {env_id}, {metric}: "
-                f"{len(valid_seeds)} seeds loaded"
-            )
-
-            plot_seed_average_curve(
-                x=x,
-                seed_curves=seed_curves,
-                algo_id=algo_id,
-                env_id=env_id,
-                metric=metric,
-                save_dir=save_dir,
-                filename_prefix=filename_prefix,
-                window_size=window_size,
-            )
-
+# =============================================================================
+# Main
+# =============================================================================
 
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
     env_id = "PerturbAnt-v4"
-    metric_list = ["nominal", "local_mean", "local_min"]
+
+    metric_list = [
+        "nominal",
+        "local_mean",
+        "local_min",
+    ]
+
     num_trials = 5
 
     # plot smoothing window
@@ -991,129 +1555,147 @@ def main():
     plot_eval_round_freq = 40
 
     # perturbation_types = ["none", "gravity", "mass", "length"]
-    perturbation_types = ["friction", "gravity"]
+    perturbation_types = [
+        "friction",
+        "gravity",
+    ]
 
     for perturbation_type in perturbation_types:
-        # 여러 알고리즘의 경로를 리스트로 정의
+
+        # =====================================================================
+        # Perturbation-strength ablation
+        #
+        # 0.1 -> explicit /0.1/ directory
+        # 0.3 -> explicit /0.3/ directory
+        #
+        # 0.5 -> DEFAULT experiment
+        #        숫자 directory가 없음
+        #
+        # 0.7 -> explicit /0.7/ directory
+        #
+        # Algorithm / dual setting은 모두 동일:
+        #
+        #   fed_ampo_ppo / adaptive / undiscounted / 0.0003
+        # =====================================================================
+
         algo_config_list = [
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/ppo_avg"),
+            (
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/"
+                f"{perturbation_type}/0.1/"
+                f"fed_ampo_ppo/adaptive/undiscounted/0.0003",
+                "0.1",
+            ),
 
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
-            
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0003"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0001"),
-            # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0002"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0005"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.001"),
-            
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.00001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.000001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0000001"),
+            (
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/"
+                f"{perturbation_type}/0.3/"
+                f"fed_ampo_ppo/adaptive/undiscounted/0.0003",
+                "0.3",
+            ),
 
+            # -------------------------------------------------------------
+            # Default perturbation strength = 0.5
+            #
+            # IMPORTANT:
+            # /0.5/ directory가 들어가지 않는다.
+            # -------------------------------------------------------------
+            (
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/"
+                f"{perturbation_type}/"
+                f"fed_ampo_ppo/adaptive/undiscounted/0.0003",
+                "0.5",
+            ),
 
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0001"),
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0003"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
-
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.5"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.7"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/1.0"),
-
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0001"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0002"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0003"),
-
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.85"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.9"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
-
-            # PPO baseline (server communication 없음).
-            # 아래 두 full_local 경로는 모두 legend에서 "PPO"로 처리된다.
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/full_local"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize/full_local"),
-
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/1.0"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.7"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/1.0"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.9/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
-
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-
-            # 같은 AMPO를 여러 설정으로 비교하려면 세 번째 값에 legend label을 지정한다.
-            # 아래 label의 N 값은 필요에 맞게 자유롭게 바꿔도 된다.
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.1/fed_ampo_ppo/adaptive/undiscounted/0.0003", "AMPO-PPO(A), N=3"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003", "AMPO-PPO(A), default"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0003", "AMPO-PPO(A), N=7"),
-            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.7/fed_ampo_ppo/adaptive/undiscounted/0.0003", "AMPO-PPO(A), N=9"),
-
+            (
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/"
+                f"{perturbation_type}/0.7/"
+                f"fed_ampo_ppo/adaptive/undiscounted/0.0003",
+                "0.7",
+            ),
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/iclr2027_ampo/num_clients/{perturbation_type}"
+        plot_root_path = (
+            f"plots/iclr2027_ampo/"
+            f"perturbation_strength/"
+            f"{env_id}/"
+            f"{perturbation_type}"
+        )
 
         # 추가 하위 폴더 인자 묶음
         #
         # 사용 예시:
+        #
         #   extra_arg_sets = []
         #       -> 추가 폴더 없이 실행
         #
         #   extra_arg_sets = [1024, 2048]
-        #       -> result_root_path/1024, result_root_path/2048 각각 실행
+        #       -> result_root_path/1024
+        #          result_root_path/2048
         #
-        #   extra_arg_sets = [(1024, 64), (2048, 128)]
-        #       -> result_root_path/1024/64, result_root_path/2048/128 각각 실행
+        #   extra_arg_sets = [
+        #       (1024, 64),
+        #       (2048, 128),
+        #   ]
         #
-        #   extra_arg_sets = [(), (1024,), (1024, 64)]
-        #       -> 인자 없음/1개/2개 설정을 모두 실행
+        #   extra_arg_sets = [
+        #       (),
+        #       (1024,),
+        #       (1024, 64),
+        #   ]
+        #
         extra_arg_sets = []
 
-        for extra_args in normalize_extra_arg_sets(extra_arg_sets):
+        for extra_args in normalize_extra_arg_sets(
+            extra_arg_sets
+        ):
             # 파일 이름 suffix
-            suffix = make_extra_args_suffix(extra_args)
-            filename_prefix = f"ppo_vs_ampo_ppo{suffix}"
+            suffix = make_extra_args_suffix(
+                extra_args
+            )
 
-            # 각 환경과 metric에 대해 모든 알고리즘을 비교 플롯
+            filename_prefix = (
+                f"ampo_perturbation_strength"
+                f"{suffix}"
+            )
+
+            # ================================================================
+            # Metric별 plot
+            # ================================================================
+
             for metric in metric_list:
+
                 algo_data_list = []
-                algo_id_counts = count_algo_ids(algo_config_list)
+
+                algo_id_counts = count_algo_ids(
+                    algo_config_list
+                )
+
                 used_plot_labels = set()
 
-                # 각 알고리즘의 데이터를 수집
-                for config in algo_config_list:
-                    algo_id, result_root_path, custom_plot_label = unpack_algo_config(config)
+                # ============================================================
+                # 각 perturbation strength 데이터 수집
+                # ============================================================
 
-                    result_root_with_args = append_extra_args_to_path(
+                for config in algo_config_list:
+
+                    (
+                        algo_id,
                         result_root_path,
-                        extra_args,
+                        custom_plot_label,
+                    ) = unpack_algo_config(
+                        config
+                    )
+
+                    result_root_with_args = (
+                        append_extra_args_to_path(
+                            result_root_path,
+                            extra_args,
+                        )
                     )
 
                     plot_label = make_unique_plot_label(
@@ -1123,9 +1705,29 @@ def main():
                         used_plot_labels=used_plot_labels,
                         custom_plot_label=custom_plot_label,
                     )
-                    used_plot_labels.add(plot_label)
 
-                    x, seed_curves, valid_seeds = collect_seed_curves(
+                    used_plot_labels.add(
+                        plot_label
+                    )
+
+                    print(
+                        f"\n"
+                        f"[Load] "
+                        f"{perturbation_type}, "
+                        f"strength={plot_label}, "
+                        f"metric={metric}"
+                    )
+
+                    print(
+                        f"       path="
+                        f"{result_root_with_args}"
+                    )
+
+                    (
+                        x,
+                        seed_curves,
+                        valid_seeds,
+                    ) = collect_seed_curves(
                         algo_id=algo_id,
                         env_id=env_id,
                         result_root_path=result_root_with_args,
@@ -1135,18 +1737,46 @@ def main():
                     )
 
                     if seed_curves is None:
-                        print(f"[Skip] No valid data: {plot_label}, {env_id}, {metric}")
+                        print(
+                            f"[Skip] No valid data: "
+                            f"{plot_label}, "
+                            f"{env_id}, "
+                            f"{metric}"
+                        )
+
                         continue
 
                     print(
-                        f"[Info] {plot_label}, {env_id}, {metric}: "
-                        f"{len(valid_seeds)} seeds loaded"
+                        f"[Info] "
+                        f"strength={plot_label}, "
+                        f"{env_id}, "
+                        f"{metric}: "
+                        f"{len(valid_seeds)} seeds loaded; "
+                        f"round range="
+                        f"{x[0]:g}..{x[-1]:g}"
                     )
-                    algo_data_list.append((plot_label, x, seed_curves))
 
-                # 수집한 모든 알고리즘을 하나의 플롯에 표시
-                if len(algo_data_list) > 0:
-                    save_dir = os.path.join(plot_root_path, env_id)
+                    algo_data_list.append(
+                        (
+                            plot_label,
+                            x,
+                            seed_curves,
+                        )
+                    )
+
+                # ============================================================
+                # 모든 perturbation strength를 하나의 plot에 표시
+                # ============================================================
+
+                if len(
+                    algo_data_list
+                ) > 0:
+
+                    save_dir = os.path.join(
+                        plot_root_path,
+                        env_id,
+                    )
+
                     plot_multiple_algos(
                         algo_data_list=algo_data_list,
                         env_id=env_id,
@@ -1159,32 +1789,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-# ("ppo_avg", f"logs/tuned/{env_id}/3/{perturbation_type}/128"),
-# ("ppo_avg", f"logs/tuned/{env_id}/5/{perturbation_type}/64"),
-# ("ppo_avg", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/ppo_avg/64/8"),
-# ("fedsp_pg_ppo", f"logs/tuned/{env_id}/20/{perturbation_type}/64"),
-# ("fedsp_pg_ppo_paper_aligned", f"logs/tuned/{env_id}/20/{perturbation_type}/64/0.0003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.01"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.03"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.00001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.0001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.1"),
-
-
-
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.2/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.5/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),

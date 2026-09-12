@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, cast
 
@@ -15,6 +16,9 @@ from stable_baselines3.common.vec_env import VecEnv, sync_envs_normalization
 from rl_zoo3.exp_manager import ExperimentManager
 from rl_zoo3.algorithms.federate.common.federated_algorithm import FederatedAlgorithmMixin
 from rl_zoo3.utils import ALGOS
+
+
+ClientNoiseValue = float | dict[str, float]
 
 
 class FederatedExperimentManager(ExperimentManager):
@@ -44,7 +48,7 @@ class FederatedExperimentManager(ExperimentManager):
 
         self.perturb_noise_type: str | None = None
         self.perturb_noise_range = 0.0
-        self.client_noise_values: list[float] = []
+        self.client_noise_values: list[ClientNoiseValue] = []
         self.client_env_kwargs: list[dict[str, Any]] = []
 
         self.eval_local_episodes = 10
@@ -79,26 +83,84 @@ class FederatedExperimentManager(ExperimentManager):
         return str(noise_type)
 
     @staticmethod
-    def _parse_client_noise_values(value: Any) -> list[float]:
+    def _parse_noise_scalar(value: Any, *, field_name: str) -> float:
+        try:
+            parsed_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a finite number") from exc
+
+        if not math.isfinite(parsed_value):
+            raise ValueError(f"{field_name} must be finite")
+        if not -1.0 < parsed_value < 1.0:
+            raise ValueError(f"{field_name} must be in (-1, 1)")
+        return parsed_value
+
+    @staticmethod
+    def _parse_client_noise_value(value: Any, *, field_name: str) -> ClientNoiseValue:
+        if isinstance(value, Mapping):
+            if len(value) == 0:
+                raise ValueError(f"{field_name} dict must not be empty")
+            parsed_dict: dict[str, float] = {}
+            for key, scalar_value in value.items():
+                key_str = str(key)
+                if key_str == "":
+                    raise ValueError(f"{field_name} dict keys must be non-empty strings")
+                parsed_dict[key_str] = FederatedExperimentManager._parse_noise_scalar(
+                    scalar_value,
+                    field_name=f"{field_name}.{key_str}",
+                )
+            return parsed_dict
+
+        return FederatedExperimentManager._parse_noise_scalar(value, field_name=field_name)
+
+    @staticmethod
+    def _parse_client_noise_values(value: Any) -> list[ClientNoiseValue]:
         """Parse explicitly configured perturbation values for each client."""
         if isinstance(value, str):
             try:
                 value = json.loads(value)
             except json.JSONDecodeError as exc:
                 raise ValueError(
-                    "client_noise_values must be a list of numbers, for example "
-                    "[-0.5, -0.25, 0.0, 0.25, 0.5]"
+                    "client_noise_values must be a list of numbers or dicts, for example "
+                    "[-0.5, -0.25, 0.0, 0.25, 0.5] or "
+                    '[{"gravity": -0.3, "friction": 0.3}, {"gravity": 0.0, "friction": 0.0}]'
                 ) from exc
 
-        if not isinstance(value, (list, tuple, np.ndarray)):
+        if not isinstance(value, list | tuple | np.ndarray):
             raise ValueError("client_noise_values must be a list, tuple, or numpy array")
 
-        parsed_values = [float(noise) for noise in value]
-        if not all(math.isfinite(noise) for noise in parsed_values):
-            raise ValueError("client_noise_values must contain only finite numbers")
-        if not all(-1.0 < noise < 1.0 for noise in parsed_values):
-            raise ValueError("Each client_noise_values entry must be in (-1, 1)")
-        return parsed_values
+        return [
+            FederatedExperimentManager._parse_client_noise_value(
+                noise,
+                field_name=f"client_noise_values[{client_idx}]",
+            )
+            for client_idx, noise in enumerate(value)
+        ]
+
+    @staticmethod
+    def _validate_client_noise_values_for_type(
+        noise_values: list[ClientNoiseValue],
+        perturb_noise_type: str | None,
+    ) -> None:
+        dict_indices = [idx for idx, noise_value in enumerate(noise_values) if isinstance(noise_value, dict)]
+        if not dict_indices:
+            return
+
+        if perturb_noise_type != "gravity_friction":
+            raise ValueError(
+                "Dict entries in client_noise_values are currently supported only when "
+                'perturb_noise_type is "gravity_friction".'
+            )
+
+        expected_keys = {"gravity", "friction"}
+        for idx in dict_indices:
+            keys = set(cast(dict[str, float], noise_values[idx]).keys())
+            if keys != expected_keys:
+                raise ValueError(
+                    'For perturb_noise_type="gravity_friction", each dict entry in '
+                    "client_noise_values must contain exactly the keys "
+                    f"{sorted(expected_keys)}; got {sorted(keys)} at index {idx}."
+                )
 
     @staticmethod
     def _as_bool(value: Any) -> bool:
@@ -251,7 +313,7 @@ class FederatedExperimentManager(ExperimentManager):
         )
         return [float(sample) for sample in samples]
 
-    def _build_client_env_kwargs(self, client_noise: float) -> dict[str, Any]:
+    def _build_client_env_kwargs(self, client_noise: ClientNoiseValue) -> dict[str, Any]:
         env_kwargs = deepcopy(self.env_kwargs)
         if self.perturb_noise_type is not None:
             env_kwargs["noise_type"] = self.perturb_noise_type
@@ -263,6 +325,65 @@ class FederatedExperimentManager(ExperimentManager):
         base_kwargs["noise_type"] = None
         base_kwargs["noise"] = 0.0
         return base_kwargs
+
+    @staticmethod
+    def _ordered_noise_items(noise_value: dict[str, float]) -> list[tuple[str, float]]:
+        priority = ("gravity", "friction")
+        priority_items = [(key, noise_value[key]) for key in priority if key in noise_value]
+        remaining_items = sorted((key, value) for key, value in noise_value.items() if key not in priority)
+        return priority_items + remaining_items
+
+    @staticmethod
+    def _format_client_noise(noise_value: ClientNoiseValue) -> str:
+        if isinstance(noise_value, dict):
+            parts = [f"{key}={value:+.4f}" for key, value in FederatedExperimentManager._ordered_noise_items(noise_value)]
+            return "{" + ", ".join(parts) + "}"
+        return f"{noise_value:+.4f}"
+
+    @staticmethod
+    def _json_client_noise(noise_value: ClientNoiseValue) -> float | dict[str, float]:
+        if isinstance(noise_value, dict):
+            return {key: float(value) for key, value in FederatedExperimentManager._ordered_noise_items(noise_value)}
+        return float(noise_value)
+
+    def _client_noise_component_names(self) -> list[str]:
+        names: set[str] = set()
+        for noise_value in self.client_noise_values:
+            if isinstance(noise_value, dict):
+                names.update(noise_value.keys())
+
+        priority = ("gravity", "friction")
+        ordered_names = [name for name in priority if name in names]
+        ordered_names.extend(sorted(name for name in names if name not in priority))
+        return ordered_names
+
+    def _client_noise_npz_arrays(self) -> dict[str, np.ndarray]:
+        has_dict_noise = any(isinstance(noise_value, dict) for noise_value in self.client_noise_values)
+        if has_dict_noise:
+            arrays = {"client_noises": np.full((len(self.client_noise_values),), np.nan, dtype=np.float32)}
+        else:
+            arrays = {"client_noises": np.asarray(self.client_noise_values, dtype=np.float32)}
+
+        for component_name in self._client_noise_component_names():
+            component_values: list[float] = []
+            for noise_value in self.client_noise_values:
+                if isinstance(noise_value, dict):
+                    component_values.append(float(noise_value.get(component_name, np.nan)))
+                else:
+                    component_values.append(float(noise_value))
+            arrays[f"client_noise_{component_name}"] = np.asarray(component_values, dtype=np.float32)
+
+        return arrays
+
+    def _client_noise_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for client_idx, noise_value in enumerate(self.client_noise_values):
+            if isinstance(noise_value, dict):
+                for key, value in self._ordered_noise_items(noise_value):
+                    metrics[f"frl/client_{client_idx}/noise/{key}"] = float(value)
+            else:
+                metrics[f"frl/client_{client_idx}/noise"] = float(noise_value)
+        return metrics
 
     @staticmethod
     def _sync_eval_env_normalization(model: BaseAlgorithm, eval_env: VecEnv) -> None:
@@ -308,7 +429,7 @@ class FederatedExperimentManager(ExperimentManager):
         self.eval_npz_path = os.path.join(self.save_path, "evaluations.npz")
         self.eval_history = {
             "rounds": [],
-            "client_noises": np.asarray(self.client_noise_values, dtype=np.float32),
+            **self._client_noise_npz_arrays(),
             "local_mean": [],
             "local_std": [],
             "nominal_mean": [],
@@ -339,7 +460,7 @@ class FederatedExperimentManager(ExperimentManager):
                 {
                     "client_id": client_idx,
                     "noise_type": self.perturb_noise_type,
-                    "noise": float(noise_value),
+                    "noise": self._json_client_noise(noise_value),
                     "env_kwargs": env_kwargs,
                 }
                 for client_idx, (noise_value, env_kwargs) in enumerate(
@@ -393,9 +514,14 @@ class FederatedExperimentManager(ExperimentManager):
         if self.eval_npz_path is None:
             return
 
+        client_noise_payload = {
+            key: np.asarray(value, dtype=np.float32)
+            for key, value in self.eval_history.items()
+            if key == "client_noises" or key.startswith("client_noise_")
+        }
         payload = {
             "rounds": np.asarray(self.eval_history["rounds"], dtype=np.int32),
-            "client_noises": np.asarray(self.eval_history["client_noises"], dtype=np.float32),
+            **client_noise_payload,
             "local_mean": np.asarray(self.eval_history["local_mean"], dtype=np.float32),
             "local_std": np.asarray(self.eval_history["local_std"], dtype=np.float32),
             "nominal_mean": np.asarray(self.eval_history["nominal_mean"], dtype=np.float32),
@@ -442,7 +568,7 @@ class FederatedExperimentManager(ExperimentManager):
         if "server_update_weight" in hyperparams:
             self.server_update_weight = float(hyperparams.pop("server_update_weight"))
 
-        configured_client_noise_values: list[float] | None = None
+        configured_client_noise_values: list[ClientNoiseValue] | None = None
         if "perturb_noise_type" in hyperparams:
             self.perturb_noise_type = self._normalize_perturb_noise_type(hyperparams.pop("perturb_noise_type"))
         if "perturb_noise_range" in hyperparams:
@@ -484,6 +610,7 @@ class FederatedExperimentManager(ExperimentManager):
                     f"got {len(configured_client_noise_values)} values for "
                     f"{self.num_clients} clients"
                 )
+            self._validate_client_noise_values_for_type(configured_client_noise_values, self.perturb_noise_type)
 
         algo_cls = self._get_federated_algo_class()
         if hasattr(algo_cls, "reset_federated_state"):
@@ -546,8 +673,7 @@ class FederatedExperimentManager(ExperimentManager):
             "frl/server_update_weight": float(self.server_update_weight),
             "frl/perturb_noise_range": float(self.perturb_noise_range),
         }
-        for client_idx, noise_value in enumerate(self.client_noise_values):
-            initial_metrics[f"frl/client_{client_idx}/noise"] = float(noise_value)
+        initial_metrics.update(self._client_noise_metrics())
         self._wandb_log(initial_metrics, step=0)
 
         if self.verbose > 0 and self.perturb_noise_type is not None:
@@ -676,7 +802,7 @@ class FederatedExperimentManager(ExperimentManager):
                         client_noise = (
                             self.client_noise_values[client_idx] if client_idx < len(self.client_noise_values) else 0.0
                         )
-                        print(f"[FRL] local update client={client_idx} noise={client_noise:+.4f}")
+                        print(f"[FRL] local update client={client_idx} noise={self._format_client_noise(client_noise)}")
                     before_timesteps = int(client_model.num_timesteps)
                     client_algo.federated_local_update(
                         current_local_steps,
@@ -713,8 +839,7 @@ class FederatedExperimentManager(ExperimentManager):
                     "frl/num_clients": int(self.num_clients),
                     "frl/server_update_weight": float(self.server_update_weight),
                 }
-                for client_idx, noise_value in enumerate(self.client_noise_values):
-                    round_metrics[f"frl/client_{client_idx}/noise"] = float(noise_value)
+                round_metrics.update(self._client_noise_metrics())
                 round_metrics.update(getattr(model, "_last_federated_metrics", {}))
                 self._wandb_log(round_metrics, step=int(aggregated_timesteps))
 

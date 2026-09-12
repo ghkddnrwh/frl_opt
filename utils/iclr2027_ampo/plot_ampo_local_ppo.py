@@ -565,42 +565,89 @@ def make_unique_plot_label(
     used_plot_labels,
 ):
     """
-    plot legend에 사용할 고유 label을 만든다.
+    논문 그림용으로 짧고 일관된 legend label을 만든다.
 
-    같은 algo_id가 여러 번 등장하면 result_root_path의 마지막 폴더명을 붙인다.
-    예:
-        fedsp_pg_ppo_paper_aligned/0.0003
-        fedsp_pg_ppo_paper_aligned/0.001
-        fedsp_pg_ppo_paper_aligned/0.003
+    기본 표기:
+        ppo_avg            -> PPOAvg
+        fed_ampo_ppo       -> AMPO-PPO / AMPO-PPO(U)
+        fed_ampo_local_ppo -> AMPO-Local-PPO(A/U)
+        fed_svrpg_m        -> FedSVRPG-M
 
-    그래도 label이 중복되면 path suffix를 점점 길게 붙인다.
+    fed_ampo_local_ppo/{K}/adaptive/... 형태이면
+        AMPO-Local-PPO(A), K={K}
+    로 표시한다.
+
+    uniform 경로이면
+        AMPO-Local-PPO(U)
+    로 표시한다.
     """
 
-    normalized_path = os.path.normpath(result_root_path)
-    path_parts = normalized_path.split(os.sep)
+    normalized_path = (
+        os.path.normpath(result_root_path)
+        .replace("\\", "/")
+        .lower()
+    )
+    path_parts = normalized_path.split("/")
 
-    if algo_id_counts.get(algo_id, 0) > 1:
-        suffix_len = 1
-        path_suffix = "/".join(path_parts[-suffix_len:])
-        base_label = f"{algo_id}/{path_suffix}"
+    # ------------------------------------------------------------------
+    # PPOAvg
+    # ------------------------------------------------------------------
+    if algo_id == "ppo_avg":
+        base_label = "PPOAvg"
+
+    # ------------------------------------------------------------------
+    # AMPO-PPO
+    # ------------------------------------------------------------------
+    elif algo_id == "fed_ampo_ppo":
+        if "/uniform" in normalized_path:
+            base_label = "AMPO-PPO(U)"
+        else:
+            # Adaptive AMPO-PPO is the main AMPO method, so keep the
+            # publication label concise.
+            base_label = "AMPO-PPO"
+
+    # ------------------------------------------------------------------
+    # AMPO-Local-PPO
+    # ------------------------------------------------------------------
+    elif algo_id == "fed_ampo_local_ppo":
+        if "/uniform" in normalized_path:
+            base_label = "AMPO-Local-PPO(U)"
+        elif "/adaptive" in normalized_path:
+            base_label = "AMPO-Local-PPO(A)"
+        else:
+            base_label = "AMPO-Local-PPO"
+
+        # 현재 local-PPO ablation 경로:
+        #   fed_ampo_local_ppo/2/adaptive/...
+        #   fed_ampo_local_ppo/4/adaptive/...
+        #   ...
+        # 에서 숫자를 K로 표시한다.
+        try:
+            algo_idx = path_parts.index("fed_ampo_local_ppo")
+            if algo_idx + 1 < len(path_parts):
+                maybe_k = path_parts[algo_idx + 1]
+                if maybe_k.isdigit():
+                    base_label = f"{base_label}, U={maybe_k}"
+        except ValueError:
+            pass
+
+    elif algo_id == "fed_svrpg_m":
+        base_label = "FedSVRPG-M"
+
     else:
-        suffix_len = 0
         base_label = algo_id
 
-    plot_label = base_label
+    # ------------------------------------------------------------------
+    # 혹시 동일 label이 중복될 경우에만 번호를 붙인다.
+    # ------------------------------------------------------------------
+    if base_label not in used_plot_labels:
+        return base_label
 
-    while plot_label in used_plot_labels:
-        suffix_len += 1
+    duplicate_idx = 2
+    while f"{base_label} ({duplicate_idx})" in used_plot_labels:
+        duplicate_idx += 1
 
-        if suffix_len <= len(path_parts):
-            path_suffix = "/".join(path_parts[-suffix_len:])
-            plot_label = f"{algo_id}/{path_suffix}"
-        else:
-            plot_label = f"{base_label} #{len(used_plot_labels) + 1}"
-            break
-
-    return plot_label
-
+    return f"{base_label} ({duplicate_idx})"
 
 def normalize_window_size(window_size=None):
     """
@@ -753,7 +800,7 @@ def plot_seed_average_curve(
         f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
-    plt.savefig(save_file, dpi=300)
+    plt.savefig(save_file, dpi=200)
     plt.close()
 
     print(f"[Saved] {save_file}")
@@ -991,15 +1038,12 @@ def main():
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/0.0003"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/1/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/2/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/4/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/8/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/16/adaptive/undiscounted/0.0003"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/2/adaptive/undiscounted/0.0003"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/4/adaptive/undiscounted/0.0003"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/8/adaptive/undiscounted/0.0003"),
+            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/16/adaptive/undiscounted/0.0003"),
             ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/32/adaptive/undiscounted/0.0003"),
             ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/64/adaptive/undiscounted/0.0003"),
-
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/32/adaptive/undiscounted/kl_gate/0.0003"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/64/adaptive/undiscounted/kl_gate/0.0003"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0001"),
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0003"),
@@ -1029,7 +1073,12 @@ def main():
         ]
 
         # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco/fixed/noise_assignment/{env_id}/{perturbation_type}"
+        plot_root_path = (
+            f"plots/iclr2027_ampo/"
+            f"ampo_local/"
+            f"{env_id}/"
+            f"{perturbation_type}"
+        )
 
         # 추가 하위 폴더 인자 묶음
         #
@@ -1050,7 +1099,7 @@ def main():
         for extra_args in normalize_extra_arg_sets(extra_arg_sets):
             # 파일 이름 suffix
             suffix = make_extra_args_suffix(extra_args)
-            filename_prefix = f"comparison{suffix}"
+            filename_prefix = f"ampo_local_comparison{suffix}"
 
             # 각 환경과 metric에 대해 모든 알고리즘을 비교 플롯
             for metric in metric_list:
@@ -1094,7 +1143,7 @@ def main():
 
                 # 수집한 모든 알고리즘을 하나의 플롯에 표시
                 if len(algo_data_list) > 0:
-                    save_dir = os.path.join(plot_root_path, env_id)
+                    save_dir = plot_root_path
                     plot_multiple_algos(
                         algo_data_list=algo_data_list,
                         env_id=env_id,
