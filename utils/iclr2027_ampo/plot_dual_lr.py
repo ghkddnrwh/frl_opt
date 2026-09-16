@@ -3,6 +3,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+# Publication-style plotting defaults
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman"],
+    "mathtext.fontset": "stix",
+    "font.size": 15,
+    "axes.labelsize": 15,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 12,
+    "axes.unicode_minus": False,
+})
+
+
 def read_scalar_from_npz(data, key, default=None):
     """
     evaluations.npz 안의 scalar 값을 안전하게 읽는다.
@@ -462,6 +476,8 @@ def collect_seed_curves(
         rounds_list=rounds_list,
     )
 
+    x = common_rounds.astype(float)
+
     freq_info = ", ".join(
         f"seed {seed}: {freq}" for seed, freq in zip(valid_seeds, logged_freqs)
     )
@@ -564,42 +580,25 @@ def make_unique_plot_label(
     algo_id_counts,
     used_plot_labels,
 ):
-    """
-    plot legend에 사용할 고유 label을 만든다.
+    """논문 그림용으로 알고리즘 legend label을 간결하게 만든다."""
 
-    같은 algo_id가 여러 번 등장하면 result_root_path의 마지막 폴더명을 붙인다.
-    예:
-        fedsp_pg_ppo_paper_aligned/0.0003
-        fedsp_pg_ppo_paper_aligned/0.001
-        fedsp_pg_ppo_paper_aligned/0.003
+    normalized_path = os.path.normpath(result_root_path).replace("\\", "/").lower()
 
-    그래도 label이 중복되면 path suffix를 점점 길게 붙인다.
-    """
+    if algo_id == "ppo_avg":
+        return "PPOAvg"
 
-    normalized_path = os.path.normpath(result_root_path)
-    path_parts = normalized_path.split(os.sep)
+    if algo_id == "fed_ampo_ppo":
+        if "/uniform" in normalized_path:
+            return "AMPO-PPO(U)"
+        if "/adaptive" in normalized_path:
+            return "AMPO-PPO(A)"
+        return "AMPO-PPO"
 
-    if algo_id_counts.get(algo_id, 0) > 1:
-        suffix_len = 1
-        path_suffix = "/".join(path_parts[-suffix_len:])
-        base_label = f"{algo_id}/{path_suffix}"
-    else:
-        suffix_len = 0
-        base_label = algo_id
+    if algo_id == "fed_svrpg_m":
+        return "FedSVRPG-M-PPO"
 
-    plot_label = base_label
-
-    while plot_label in used_plot_labels:
-        suffix_len += 1
-
-        if suffix_len <= len(path_parts):
-            path_suffix = "/".join(path_parts[-suffix_len:])
-            plot_label = f"{algo_id}/{path_suffix}"
-        else:
-            plot_label = f"{base_label} #{len(used_plot_labels) + 1}"
-            break
-
-    return plot_label
+    # 위 알고리즘 외에는 기존 algo_id를 그대로 사용한다.
+    return algo_id
 
 
 def normalize_window_size(window_size=None):
@@ -717,7 +716,7 @@ def plot_seed_average_curve(
     avg_curve = np.nanmean(plot_seed_curves, axis=0)
     std_curve = np.nanstd(plot_seed_curves, axis=0)
 
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(10, 6))
 
     if window_size > 1:
         line_label = f"seed average (window={window_size})"
@@ -741,19 +740,25 @@ def plot_seed_average_curve(
         label="± seed std",
     )
 
-    plt.xlabel("Timesteps")
+    # plt.xlabel("Timesteps")
+    plt.xlabel("Global Communication Rounds")
     plt.ylabel("Return")
-    plt.title(f"{algo_id} - {env_id} - {metric}")
     plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+    plt.legend(frameon=False)
+    # Reduce outer whitespace more aggressively for paper figures.
+    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
 
     save_file = os.path.join(
         save_dir,
         f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
-    plt.savefig(save_file, dpi=300)
+    plt.savefig(
+        save_file,
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
     plt.close()
 
     print(f"[Saved] {save_file}")
@@ -783,7 +788,7 @@ def plot_multiple_algos(
     window_size = normalize_window_size(window_size)
     window_suffix = make_window_suffix(window_size)
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(10, 6))
 
     for plot_label, x, seed_curves in algo_data_list:
         # window smoothing은 seed별 curve에 먼저 적용한다.
@@ -808,24 +813,39 @@ def plot_multiple_algos(
             alpha=0.15,
         )
 
-    plt.xlabel("Timesteps")
+    # plt.xlabel("Timesteps")
+    plt.xlabel("Global Communication Rounds")
     plt.ylabel("Return")
 
-    if window_size > 1:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric} - window={window_size}")
-    else:
-        plt.title(f"Algorithm Comparison - {env_id} - {metric}")
-
     plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+
+    # 동일 알고리즘의 여러 하이퍼파라미터 곡선은 모두 유지하되,
+    # legend에는 같은 이름을 한 번만 표시한다.
+    handles, labels = plt.gca().get_legend_handles_labels()
+    unique_legend = {}
+    for handle, label in zip(handles, labels):
+        if label not in unique_legend:
+            unique_legend[label] = handle
+
+    plt.legend(
+        unique_legend.values(),
+        unique_legend.keys(),
+        frameon=False,
+    )
+    # Reduce outer whitespace more aggressively for paper figures.
+    plt.tight_layout(pad=0.15, h_pad=0.15, w_pad=0.15)
 
     save_file = os.path.join(
         save_dir,
         f"{filename_prefix}_{metric}_learning_curve.png",
     )
 
-    plt.savefig(save_file, dpi=300)
+    plt.savefig(
+        save_file,
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
     plt.close()
 
     print(f"[Saved] {save_file}")
@@ -903,240 +923,520 @@ def generate_learning_plots(
             )
 
 
-def main():
-    # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbAnt-v4"
-    metric_list = ["nominal", "local_mean", "local_min"]
-    num_trials = 5
 
-    # plot smoothing window
-    # - 1 또는 None이면 기존처럼 smoothing 없이 plot
-    # - 예: 5, 10, 20 등으로 설정하면 centered moving average 적용
-    plot_window_size = 3
+def summarize_last_n_evals(seed_curves, last_n=10):
+    """
+    각 seed별로 마지막 last_n evaluation point의 평균을 계산한다.
 
-    # plot에 사용할 evaluation round 주기
-    # 예: 80이면 모든 seed에서 round 80, 160, 240, ... 의 실제 저장값만 사용
-    # seed의 원래 eval_round_freq가 80의 약수가 아니면 ValueError 발생
-    # (예: logged=30, requested=80 -> error)
-    plot_eval_round_freq = 40
+    Parameters
+    ----------
+    seed_curves : np.ndarray
+        shape = (num_seeds, num_eval_points)
+    last_n : int
+        마지막 몇 개 evaluation point를 평균낼지.
 
-    # perturbation_types = ["none", "gravity", "mass", "length"]
-    perturbation_types = ["friction", "gravity"]
+    Returns
+    -------
+    seed_final_scores : np.ndarray
+        shape = (num_seeds,)
+        각 seed의 마지막 last_n evaluation 평균.
+    mean_score : float
+        seed_final_scores의 평균.
+    std_score : float
+        seed_final_scores의 표준편차 (seed 방향).
+    """
+    seed_curves = np.asarray(seed_curves, dtype=float)
 
-    for perturbation_type in perturbation_types:
-        # 여러 알고리즘의 경로를 리스트로 정의
-        algo_config_list = [
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/ppo_avg"),
+    if seed_curves.ndim != 2:
+        raise ValueError(
+            f"seed_curves must be 2D (num_seeds, num_eval_points), "
+            f"but got shape={seed_curves.shape}"
+        )
 
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform"),
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/uniform/0.003"),
-            
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0003"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.00001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.000001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/0.0000001"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0001"),
-            # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0002"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0005"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.001"),
-            
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.00001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.000001"),
-            # # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0000001"),
+    if seed_curves.shape[1] == 0:
+        raise ValueError("No evaluation points are available.")
 
+    if last_n < 1:
+        raise ValueError(f"last_n must be >= 1, but got {last_n}")
 
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0001"),
-            # # # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.7/0.0003"),
+    n = min(last_n, seed_curves.shape[1])
 
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
+    # 먼저 seed마다 마지막 n개 evaluation point를 평균낸다.
+    seed_final_scores = np.nanmean(seed_curves[:, -n:], axis=1)
 
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.5"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/0.7"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/uniform/1.0"),
+    # 그 scalar들을 seed 방향으로 평균 / 표준편차 계산.
+    mean_score = float(np.nanmean(seed_final_scores))
+    std_score = float(np.nanstd(seed_final_scores))
 
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0001"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0002"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/0.0003"),
-
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.85"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.9"),
-            # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
-
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/full_local"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize/full_local"),
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
-
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
-            
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0001"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.5"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.7"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/1.0"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/0.0001"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/0.0003"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/1/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/2/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/4/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/8/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/16/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/32/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/64/adaptive/undiscounted/0.0003"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/32/adaptive/undiscounted/kl_gate/0.0003"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/64/adaptive/undiscounted/kl_gate/0.0003"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0001"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0003"),
-
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0003/0.85"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0003/0.9"),
-            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0003/0.95"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/0.7"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/1.0/1.0"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/0.7"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/1.0/1.0"),
-
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.85/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.9/0.5"),
-            # ("fed_svrpg_m", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_svrpg_m/fedavg/0.95/0.5"),
+    return seed_final_scores, mean_score, std_score
 
 
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/3/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/7/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/9/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
+def collect_dual_lr_sensitivity(
+    env_id,
+    perturbation_type,
+    algo_config_list,
+    eta_pi,
+    num_trials,
+    metric="local_min",
+    eval_round_freq=40,
+    last_n=10,
+):
+    """
+    하나의 perturbation type에 대해 dual learning rate sensitivity 결과를 수집한다.
 
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.1/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
-            # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.7/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
+    algo_config_list 형식:
+        [
+            (eta_lambda, algo_id, result_root_path),
+            ...
         ]
 
-        # plot 저장 root
-        plot_root_path = f"plots/frl_eh/tuning_mujoco/fixed/noise_assignment/{env_id}/{perturbation_type}"
+    기존 plotting 코드처럼 로그 경로를 main()에서 명시적으로 지정하고,
+    여기서는 전달받은 경로를 그대로 사용한다.
+    """
+    ratios = []
+    means = []
+    stds = []
+    details = []
 
-        # 추가 하위 폴더 인자 묶음
-        #
-        # 사용 예시:
-        #   extra_arg_sets = []
-        #       -> 추가 폴더 없이 실행
-        #
-        #   extra_arg_sets = [1024, 2048]
-        #       -> result_root_path/1024, result_root_path/2048 각각 실행
-        #
-        #   extra_arg_sets = [(1024, 64), (2048, 128)]
-        #       -> result_root_path/1024/64, result_root_path/2048/128 각각 실행
-        #
-        #   extra_arg_sets = [(), (1024,), (1024, 64)]
-        #       -> 인자 없음/1개/2개 설정을 모두 실행
-        extra_arg_sets = []
+    for eta_lambda, algo_id, result_root_path in algo_config_list:
+        _, seed_curves, valid_seeds = collect_seed_curves(
+            algo_id=algo_id,
+            env_id=env_id,
+            result_root_path=result_root_path,
+            metric=metric,
+            num_trials=num_trials,
+            eval_round_freq=eval_round_freq,
+        )
 
-        for extra_args in normalize_extra_arg_sets(extra_arg_sets):
-            # 파일 이름 suffix
-            suffix = make_extra_args_suffix(extra_args)
-            filename_prefix = f"comparison{suffix}"
+        if seed_curves is None:
+            print(
+                f"[Skip] No valid data: perturbation={perturbation_type}, "
+                f"eta_lambda={eta_lambda}, path={result_root_path}"
+            )
+            continue
 
-            # 각 환경과 metric에 대해 모든 알고리즘을 비교 플롯
-            for metric in metric_list:
-                algo_data_list = []
-                algo_id_counts = count_algo_ids(algo_config_list)
-                used_plot_labels = set()
+        # seed마다 마지막 last_n evaluation point를 먼저 평균
+        seed_scores, mean_score, std_score = summarize_last_n_evals(
+            seed_curves=seed_curves,
+            last_n=last_n,
+        )
 
-                # 각 알고리즘의 데이터를 수집
-                for algo_id, result_root_path in algo_config_list:
-                    result_root_with_args = append_extra_args_to_path(
-                        result_root_path,
-                        extra_args,
-                    )
+        ratio = float(eta_lambda) / float(eta_pi)
 
-                    plot_label = make_unique_plot_label(
-                        algo_id=algo_id,
-                        result_root_path=result_root_with_args,
-                        algo_id_counts=algo_id_counts,
-                        used_plot_labels=used_plot_labels,
-                    )
-                    used_plot_labels.add(plot_label)
+        ratios.append(ratio)
+        means.append(mean_score)
+        stds.append(std_score)
+        details.append(
+            {
+                "perturbation": perturbation_type,
+                "eta_lambda": float(eta_lambda),
+                "eta_pi": float(eta_pi),
+                "ratio": ratio,
+                "result_root_path": result_root_path,
+                "valid_seeds": valid_seeds,
+                "seed_last_n_means": seed_scores,
+                "mean": mean_score,
+                "std": std_score,
+            }
+        )
 
-                    x, seed_curves, valid_seeds = collect_seed_curves(
-                        algo_id=algo_id,
-                        env_id=env_id,
-                        result_root_path=result_root_with_args,
-                        metric=metric,
-                        num_trials=num_trials,
-                        eval_round_freq=plot_eval_round_freq,
-                    )
+        print(
+            f"[Dual LR] {perturbation_type:8s} | "
+            f"eta_lambda={eta_lambda:g} | "
+            f"eta_lambda/eta_pi={ratio:.6g} | "
+            f"mean={mean_score:.4f} | std={std_score:.4f} | "
+            f"seeds={valid_seeds}"
+        )
 
-                    if seed_curves is None:
-                        print(f"[Skip] No valid data: {plot_label}, {env_id}, {metric}")
-                        continue
+    if len(ratios) == 0:
+        return None
 
-                    print(
-                        f"[Info] {plot_label}, {env_id}, {metric}: "
-                        f"{len(valid_seeds)} seeds loaded"
-                    )
-                    algo_data_list.append((plot_label, x, seed_curves))
+    order = np.argsort(np.asarray(ratios, dtype=float))
 
-                # 수집한 모든 알고리즘을 하나의 플롯에 표시
-                if len(algo_data_list) > 0:
-                    save_dir = os.path.join(plot_root_path, env_id)
-                    plot_multiple_algos(
-                        algo_data_list=algo_data_list,
-                        env_id=env_id,
-                        metric=metric,
-                        save_dir=save_dir,
-                        filename_prefix=filename_prefix,
-                        window_size=plot_window_size,
-                    )
+    return {
+        "ratios": np.asarray(ratios, dtype=float)[order],
+        "means": np.asarray(means, dtype=float)[order],
+        "stds": np.asarray(stds, dtype=float)[order],
+        "details": [details[i] for i in order],
+    }
+
+def collect_uniform_baseline(
+    env_id,
+    perturbation_type,
+    algo_id,
+    result_root_path,
+    num_trials,
+    metric="local_min",
+    eval_round_freq=40,
+    last_n=10,
+):
+    """
+    lambda를 업데이트하지 않는 uniform AMPO-PPO baseline 성능을 계산한다.
+
+    계산 방식은 adaptive sensitivity point와 동일하다.
+
+    1. 각 seed의 evaluation curve를 불러온다.
+    2. 각 seed에서 마지막 last_n evaluation point의 평균을 계산한다.
+    3. seed별 scalar score들의 평균과 표준편차를 계산한다.
+
+    return:
+        {
+            "perturbation": str,
+            "mean": float,
+            "std": float,
+            "valid_seeds": list,
+            "seed_last_n_means": np.ndarray,
+            "result_root_path": str,
+        }
+    """
+
+    _, seed_curves, valid_seeds = collect_seed_curves(
+        algo_id=algo_id,
+        env_id=env_id,
+        result_root_path=result_root_path,
+        metric=metric,
+        num_trials=num_trials,
+        eval_round_freq=eval_round_freq,
+    )
+
+    if seed_curves is None:
+        print(
+            f"[Skip Uniform] No valid data: "
+            f"perturbation={perturbation_type}, "
+            f"path={result_root_path}"
+        )
+        return None
+
+    seed_scores, mean_score, std_score = summarize_last_n_evals(
+        seed_curves=seed_curves,
+        last_n=last_n,
+    )
+
+    print(
+        f"[Uniform Baseline] {perturbation_type:8s} | "
+        f"mean={mean_score:.4f} | std={std_score:.4f} | "
+        f"seeds={valid_seeds}"
+    )
+
+    return {
+        "perturbation": perturbation_type,
+        "mean": mean_score,
+        "std": std_score,
+        "valid_seeds": valid_seeds,
+        "seed_last_n_means": seed_scores,
+        "result_root_path": result_root_path,
+    }
+
+
+
+def plot_dual_lr_ratio_friction_gravity(
+    results,
+    uniform_baselines,
+    eta_pi,
+    plot_root_path,
+    env_id,
+    metric="local_min",
+    last_n=10,
+    use_log_x=False,
+):
+    """
+    Friction과 Gravity의 dual learning-rate sensitivity를 하나의 figure에 표시한다.
+
+    Adaptive curves:
+        x = eta_lambda / eta_pi
+        각 x tick은 실제 ratio 크기와 관계없이 동일한 간격으로 표시한다.
+        point = seed별 마지막 last_n evaluation 평균들의 seed 평균
+        shaded region = seed 표준편차
+
+    Uniform baselines:
+        lambda를 업데이트하지 않는 uniform AMPO-PPO의 성능을
+        perturbation별 dashed horizontal line으로 표시한다.
+
+    Legend:
+        - Friction
+        - Gravity
+        - AMPO-PPO(U) (Friction)
+        - AMPO-PPO(U) (Gravity)
+    """
+    perturbation_styles = {
+        "friction": {"label": "Friction", "marker": "o"},
+        "gravity": {"label": "Gravity", "marker": "s"},
+    }
+
+    if len(results) == 0:
+        raise RuntimeError("No valid friction/gravity data was found.")
+
+    os.makedirs(plot_root_path, exist_ok=True)
+    plt.figure(figsize=(7.2, 5.2))
+
+    # -------------------------------------------------------
+    # 모든 perturbation에서 사용된 ratio를 먼저 모은다.
+    # -------------------------------------------------------
+    all_ratios = []
+
+    for perturbation_type in ["friction", "gravity"]:
+        if perturbation_type in results:
+            all_ratios.extend(results[perturbation_type]["ratios"].tolist())
+
+    if len(all_ratios) == 0:
+        raise RuntimeError("No eta_lambda / eta_pi ratios are available for plotting.")
+
+    ratio_ticks = np.unique(np.asarray(all_ratios, dtype=float))
+    ratio_ticks.sort()
+
+    # 실제 ratio -> 동일 간격의 categorical position
+    # 예:
+    # 0.01   -> 0
+    # 0.0333 -> 1
+    # 0.1    -> 2
+    # ...
+    ratio_to_pos = {
+        ratio: idx
+        for idx, ratio in enumerate(ratio_ticks)
+    }
+
+    # adaptive curve에서 실제 사용된 색을 저장해
+    # 같은 perturbation의 uniform baseline에 재사용한다.
+    perturbation_colors = {}
+
+    # -------------------------------------------------------
+    # Adaptive lambda sensitivity curves
+    # -------------------------------------------------------
+    for perturbation_type in ["friction", "gravity"]:
+        if perturbation_type not in results:
+            continue
+
+        result = results[perturbation_type]
+        style = perturbation_styles[perturbation_type]
+
+        ratios = result["ratios"]
+        y = result["means"]
+        y_std = result["stds"]
+
+        # 실제 ratio 대신 동일 간격 index 사용
+        x_pos = np.array(
+            [ratio_to_pos[r] for r in ratios],
+            dtype=float,
+        )
+
+        line, = plt.plot(
+            x_pos,
+            y,
+            marker=style["marker"],
+            markersize=8,
+            linewidth=2.5,
+            label=style["label"],
+        )
+
+        perturbation_colors[perturbation_type] = line.get_color()
+
+        plt.fill_between(
+            x_pos,
+            y - y_std,
+            y + y_std,
+            alpha=0.18,
+            color=line.get_color(),
+        )
+
+    # -------------------------------------------------------
+    # Uniform AMPO-PPO baselines
+    # -------------------------------------------------------
+    for perturbation_type in ["friction", "gravity"]:
+        if perturbation_type not in uniform_baselines:
+            continue
+
+        baseline = uniform_baselines[perturbation_type]
+        style = perturbation_styles[perturbation_type]
+        baseline_mean = baseline["mean"]
+
+        plt.axhline(
+            y=baseline_mean,
+            color=perturbation_colors.get(perturbation_type, None),
+            linestyle="--",
+            linewidth=2.0,
+            label=f'AMPO-PPO(U) ({style["label"]})',
+        )
+
+    # -------------------------------------------------------
+    # x축은 동일한 간격, tick label만 실제 ratio
+    # -------------------------------------------------------
+    tick_positions = np.arange(len(ratio_ticks))
+
+    plt.xticks(
+        tick_positions,
+        [f"{x:.3g}" for x in ratio_ticks],
+    )
+
+    # categorical x-position을 사용하므로 log scale은 적용하지 않는다.
+    if use_log_x:
+        print(
+            "[Warning] use_log_x=True was requested, but the x-axis uses "
+            "equal-spaced categorical positions. Log scaling is ignored."
+        )
+
+    plt.xlabel(r"$\eta_\lambda / \eta_\pi$")
+    plt.ylabel(
+        "Worst-case Local Return"
+        if metric == "local_min"
+        else "Return"
+    )
+
+    plt.grid(True, alpha=0.3)
+    plt.legend(frameon=False, loc="upper left")
+    plt.tight_layout(pad=0.2)
+
+    save_file = os.path.join(
+        plot_root_path,
+        f"{env_id}_dual_lr_ratio_{metric}_last{last_n}.png",
+    )
+
+    plt.savefig(
+        save_file,
+        dpi=250,
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+
+    plt.close()
+
+    print(f"[Saved] {save_file}")
+
+
+def main():
+    env_id = "PerturbHopper-v4"
+    metric = "local_min"
+    num_trials = 5
+
+    # policy learning rate는 모든 실험에서 고정
+    eta_pi = 0.003
+
+    # 각 point / baseline은 seed별 마지막 10 evaluation point 평균을 사용
+    last_n = 10
+
+    # 기존 코드와 동일하게 exact evaluation round만 사용
+    plot_eval_round_freq = 40
+
+    # friction / gravity 모두 계산
+    perturbation_types = ["friction", "gravity"]
+
+    # adaptive lambda sensitivity 결과
+    results = {}
+
+    # lambda를 업데이트하지 않는 uniform AMPO-PPO baseline 결과
+    uniform_baselines = {}
+
+    for perturbation_type in perturbation_types:
+        # ---------------------------------------------------
+        # Adaptive AMPO-PPO: dual learning-rate sensitivity
+        # ---------------------------------------------------
+        algo_config_list = [
+            (
+                0.00003,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.00003",
+            ),
+            (
+                0.0001,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001",
+            ),
+            (
+                0.0003,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003",
+            ),
+            (
+                0.0005,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0005",
+            ),
+            (
+                0.0007,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0007",
+            ),
+            (
+                0.001,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.001",
+            ),
+            (
+                0.003,
+                "fed_ampo_ppo",
+                f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.003",
+            ),
+            # (
+            #     0.01,
+            #     "fed_ampo_ppo",
+            #     f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.01",
+            # ),
+            # (
+            #     0.03,
+            #     "fed_ampo_ppo",
+            #     f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.03",
+            # ),
+            # (
+            #     0.1,
+            #     "fed_ampo_ppo",
+            #     f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.1",
+            # ),
+        ]
+
+        result = collect_dual_lr_sensitivity(
+            env_id=env_id,
+            perturbation_type=perturbation_type,
+            algo_config_list=algo_config_list,
+            eta_pi=eta_pi,
+            num_trials=num_trials,
+            metric=metric,
+            eval_round_freq=plot_eval_round_freq,
+            last_n=last_n,
+        )
+
+        if result is not None:
+            results[perturbation_type] = result
+
+        # ---------------------------------------------------
+        # Uniform AMPO-PPO baseline
+        # lambda를 업데이트하지 않는 알고리즘
+        # ---------------------------------------------------
+        uniform_algo_config = (
+            "fed_ampo_ppo",
+            f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform",
+        )
+
+        uniform_algo_id, uniform_result_root_path = uniform_algo_config
+
+        uniform_result = collect_uniform_baseline(
+            env_id=env_id,
+            perturbation_type=perturbation_type,
+            algo_id=uniform_algo_id,
+            result_root_path=uniform_result_root_path,
+            num_trials=num_trials,
+            metric=metric,
+            eval_round_freq=plot_eval_round_freq,
+            last_n=last_n,
+        )
+
+        if uniform_result is not None:
+            uniform_baselines[perturbation_type] = uniform_result
+
+    # -------------------------------------------------------
+    # Friction / Gravity adaptive curves + uniform baselines
+    # -------------------------------------------------------
+    plot_root_path = f"plots/iclr2027_ampo/dual_lr_sensitivity/{env_id}"
+
+    plot_dual_lr_ratio_friction_gravity(
+        results=results,
+        uniform_baselines=uniform_baselines,
+        eta_pi=eta_pi,
+        plot_root_path=plot_root_path,
+        env_id=env_id,
+        metric=metric,
+        last_n=last_n,
+        use_log_x=False,
+    )
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-# ("ppo_avg", f"logs/tuned/{env_id}/3/{perturbation_type}/128"),
-# ("ppo_avg", f"logs/tuned/{env_id}/5/{perturbation_type}/64"),
-# ("ppo_avg", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/ppo_avg/64/8"),
-# ("fedsp_pg_ppo", f"logs/tuned/{env_id}/20/{perturbation_type}/64"),
-# ("fedsp_pg_ppo_paper_aligned", f"logs/tuned/{env_id}/20/{perturbation_type}/64/0.0003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.0003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.003"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.01"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.03"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.00001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.0001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/adaptive/64/0.001"),
-# ("fed_ampo_ppo", f"logs/tuning_classic_control/{env_id}/{perturbation_type}/fed_ampo_ppo/uniform/64/0.1"),
-
-
-
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.2/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.5/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.8/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.85/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.9/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/0.95/0.5"),
-# ("fed_svrpg_m", f"logs/tuning_mujoco_long/revised4/{env_id}/{perturbation_type}/fed_svrpg_m/1.0/0.5"),

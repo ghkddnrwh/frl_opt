@@ -178,6 +178,7 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
 
     federated_actor_module_name = "policy"
     federated_critic_module_name = "policy"
+    valid_sync_modes: tuple[str, ...] = ("federated", "full_local")
     valid_dual_update_modes: tuple[str, ...] = ("adaptive", "uniform")
     valid_critic_sync_modes: tuple[str, ...] = ("local", "fedavg", "actor_like")
     valid_vecnormalize_sync_modes: tuple[str, ...] = ("none", "obs", "reward", "obs_reward")
@@ -218,11 +219,22 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         "worst_group_lambda_cap",
         "gradient_diagnostics",
         "log_wandb",
+        "sync_mode",
     )
 
     _last_global_vecnormalize_state: VecNormalizeState | None = None
 
     def __init__(self, *args, **kwargs):
+        self.sync_mode = self._normalize_sync_mode(kwargs.pop("sync_mode", "federated"))
+        self._full_local_actor_mix_weight = 1.0
+        if self.sync_mode == "full_local":
+            raw_server_update_weight = kwargs.get("server_update_weight", 1.0)
+            self._full_local_actor_mix_weight = (
+                1.0 if raw_server_update_weight is None else float(raw_server_update_weight)
+            )
+            if not (0.0 < self._full_local_actor_mix_weight <= 1.0):
+                raise ValueError("server_update_weight must be in (0, 1].")
+
         self.dual_lr = float(kwargs.pop("dual_lr", 0.05))
         self.initial_lambda = kwargs.pop("initial_lambda", None)
 
@@ -268,6 +280,11 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         if raw_dual_mode is None:
             raw_dual_mode = "uniform" if fixed_uniform else "adaptive"
         self.dual_update_mode = self._normalize_dual_update_mode(raw_dual_mode)
+
+        if self.sync_mode == "full_local":
+            self.critic_sync_mode = "local"
+            self.vecnormalize_sync_mode = "none"
+
         self._federated_progress_lock: float | None = None
 
         for key in self.federated_manager_keys:
@@ -275,7 +292,9 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
 
         super().__init__(*args, **kwargs)
 
-        self.lambda_weights: np.ndarray | None = None
+        self.lambda_weights: np.ndarray | None = (
+            np.ones(1, dtype=np.float64) if self.sync_mode == "full_local" else None
+        )
         self._ampo_last_actor_gradient: FederatedModules | None = None
         self._ampo_last_return: float | None = None
         self._ampo_last_critic_state: FederatedModules | None = None
@@ -309,6 +328,9 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
 
     def prepare_federated_training(self, clients: Sequence[FederatedAlgorithmMixin]) -> None:
         del clients
+        if self.sync_mode == "full_local":
+            type(self)._last_global_vecnormalize_state = None
+            return
         if self.vecnormalize_sync_mode == "none":
             type(self)._last_global_vecnormalize_state = None
             return
@@ -321,6 +343,31 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
             super()._update_current_progress_remaining(num_timesteps, total_timesteps)
             return
         self._current_progress_remaining = self._federated_progress_lock
+
+    @classmethod
+    def _normalize_sync_mode(cls, mode: str) -> str:
+        normalized = str(mode).strip().lower().replace("-", "_")
+        aliases = {
+            "fedampo": "federated",
+            "fed_ampo": "federated",
+            "global": "federated",
+            "sync": "federated",
+            "default": "federated",
+            "local": "full_local",
+            "full": "full_local",
+            "none": "full_local",
+            "off": "full_local",
+            "no_sync": "full_local",
+            "local_only": "full_local",
+            "independent": "full_local",
+            "independent_clients": "full_local",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in cls.valid_sync_modes:
+            raise ValueError(
+                f"Unsupported sync_mode={mode!r}. Choose one of {cls.valid_sync_modes}."
+            )
+        return normalized
 
     @staticmethod
     def _as_bool(value: Any) -> bool:
@@ -1113,6 +1160,22 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         self._ampo_last_return = float(self._ampo_dual_return_ema) if self._ampo_dual_return_ema is not None else 0.0
         self._ampo_last_num_actor_batches = num_actor_batches
 
+        if self.sync_mode == "full_local":
+            actor_before = self._get_actor_state()
+            actor_updated = self._add_scaled_modules(
+                actor_before,
+                self._ampo_last_actor_gradient,
+                self._current_server_actor_lr(),
+            )
+            if self._full_local_actor_mix_weight < 1.0:
+                actor_updated = self._mix_modules(
+                    actor_before,
+                    actor_updated,
+                    self._full_local_actor_mix_weight,
+                )
+            self._set_actor_state(actor_updated)
+            self.lambda_weights = np.ones(1, dtype=np.float64)
+
         if self.critic_sync_mode == "fedavg":
             self._ampo_last_critic_state = self._get_critic_state()
             self._ampo_last_critic_delta = None
@@ -1127,6 +1190,17 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         self._federated_progress_lock = None
 
     def get_upload_payload(self) -> FederatedPayload:
+        if self.sync_mode == "full_local":
+            return {
+                "sync_mode": self.sync_mode,
+                "critic_sync_mode": "local",
+                "vecnormalize_sync_mode": "none",
+                "meta": {
+                    "num_timesteps": int(self.num_timesteps),
+                    "full_local": True,
+                },
+            }
+
         if self._ampo_last_actor_gradient is None:
             self._ampo_last_actor_gradient = self._zero_like_actor_state()
         if self._ampo_last_return is None:
@@ -1177,6 +1251,30 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         del weights
         if len(uploads) == 0:
             raise ValueError("At least one upload is required.")
+
+        sync_modes = {
+            cls._normalize_sync_mode(str(upload.get("sync_mode", "federated")))
+            for upload in uploads
+        }
+        if len(sync_modes) != 1:
+            raise ValueError(f"Mixed sync_mode values are not supported: {sync_modes}.")
+        sync_mode = next(iter(sync_modes))
+
+        if sync_mode == "full_local":
+            cls._last_global_vecnormalize_state = None
+            return {
+                "sync_mode": "full_local",
+                "critic_sync_mode": "local",
+                "vecnormalize_sync_mode": "none",
+                "meta": {
+                    "num_clients": len(uploads),
+                    "full_local": True,
+                    "client_timesteps": [
+                        int(upload.get("meta", {}).get("num_timesteps", 0))
+                        for upload in uploads
+                    ],
+                },
+            }
 
         critic_modes = {cls._normalize_critic_sync_mode(str(upload.get("critic_sync_mode", "local"))) for upload in uploads}
         if len(critic_modes) != 1:
@@ -1285,6 +1383,14 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         return payload
 
     def apply_global_payload(self, payload: FederatedPayload, mix_weight: float = 1.0) -> None:
+        payload_sync_mode = self._normalize_sync_mode(str(payload.get("sync_mode", self.sync_mode)))
+        if payload_sync_mode != self.sync_mode:
+            raise ValueError(
+                f"sync_mode={self.sync_mode!r} does not match payload {payload_sync_mode!r}."
+            )
+        if self.sync_mode == "full_local":
+            return
+
         if not (0.0 < mix_weight <= 1.0):
             raise ValueError("mix_weight must be in (0, 1].")
 
@@ -1765,6 +1871,14 @@ class FedAMPOGroupPPO(FederatedAlgorithmMixin, PPO):
         return 1.0
 
     def get_broadcast_payload(self) -> FederatedPayload:
+        if self.sync_mode == "full_local":
+            return {
+                "sync_mode": "full_local",
+                "critic_sync_mode": "local",
+                "vecnormalize_sync_mode": "none",
+                "meta": {"full_local": True},
+            }
+
         payload: FederatedPayload = {
             "actor_state": self._get_actor_state(),
             "lambda_weights": None if self.lambda_weights is None else self.lambda_weights.copy(),

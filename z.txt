@@ -1,2 +1,6 @@
-logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/gravity/0.3/ppo_avg/full_local/
-
+(frl_opt) ukjo@ukjoui-MacBookPro frl_opt % ps -ef | grep python | grep train.py
+  501 69796 52519   0  8:32AM ttys250   98:52.21 python rl_zoo3/train.py --algo ppo_avg --env PerturbAnt-v4 --log-folder logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/friction/0.3/ppo_avg/local_critic --hyperparams n_timesteps:10e6 perturb_noise_type:"friction" client_noise_values:[-0.3,-0.15,0.0,0.15,0.3] local_steps:512 n_steps:512 eval_round_freq:40 critic_sync_mode:"local" --seed 1 --frl --log-wandb True --device cpu --num-threads 1
+  501 69611 52583   0  8:23AM ttys256  107:35.40 python rl_zoo3/train.py --algo ppo_avg --env PerturbWalker2d-v4 --log-folder logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/gravity/0.3/ppo_avg/local_critic --hyperparams n_timesteps:10e6 perturb_noise_type:"gravity" client_noise_values:[-0.3,-0.15,0.0,0.15,0.3] local_steps:512 n_steps:512 eval_round_freq:40 critic_sync_mode:"local" --seed 5 --frl --log-wandb True --device cpu --num-threads 1
+  
+  
+  501 68969 53044   0  7:49AM ttys260  141:56.43 python rl_zoo3/train.py --algo ppo_avg --env PerturbHalfCheetah-v4 --log-folder logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/gravity/0.3/ppo_avg/local_critic/normalize --hyperparams n_timesteps:10e6 perturb_noise_type:"gravity" client_noise_values:[-0.3,-0.15,0.0,0.15,0.3] local_steps:512 n_steps:512 eval_round_freq:40 critic_sync_mode:"local" normalize:True --seed 4 --frl --log-wandb True --device cpu --num-threads 1
