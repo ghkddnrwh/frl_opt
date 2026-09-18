@@ -905,7 +905,7 @@ def generate_learning_plots(
 
 def main():
     # env_id_list = ["PerturbPendulum-v1"]
-    env_id = "PerturbAnt-v4"
+    env_id = "PerturbHalfCheetah-v4"
     metric_list = ["nominal", "local_mean", "local_min"]
     num_trials = 5
 
@@ -971,11 +971,14 @@ def main():
             # # # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0002/0.95"),
 
             # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/full_local"),
-            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize/full_local"),
-            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
+            ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize/full_local"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/local_critic"),
             # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/normalize"),
+            # ("ppo_avg", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/ppo_avg/local_critic/normalize"),
 
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform"),
+            ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/uniform/full_local"),
             
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0001"),
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/lambda_cap/0.0003"),
@@ -984,7 +987,7 @@ def main():
             # ("fed_ampo_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_ppo/adaptive/undiscounted/0.0003"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.5"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.7"),
+            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/0.7"),
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/uniform/1.0"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/0.0001"),
@@ -1002,7 +1005,7 @@ def main():
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/64/adaptive/undiscounted/kl_gate/0.0003"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0001"),
-            ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0003"),
+            # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/kl_gate/0.0003"),
 
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0003/0.85"),
             # ("fed_ampo_local_ppo", f"logs/fed_ampo/tuned_mujoco/fixed/noise_assignment/{perturbation_type}/0.3/fed_ampo_local_ppo/adaptive/undiscounted/momentum/0.0003/0.9"),

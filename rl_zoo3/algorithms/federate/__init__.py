@@ -1,4 +1,4 @@
-from rl_zoo3.algorithms.federate.ampo import FedAMPPO, FedAMPOPPO, FedAMPOLocalPPO
+from rl_zoo3.algorithms.federate.ampo import FedAMPPO, FedAMPOPPO, FedAMPOLocalPPO, FedAMPOGroupPPO
 from rl_zoo3.algorithms.federate.fedsp_pg.fedsp_pg_ppo import FedSPPGPPO
 from rl_zoo3.algorithms.federate.fedsp_pg.fedsp_pg_ppo_paper_aligned import FedSPPGPPOPaperAligned
 from rl_zoo3.algorithms.federate.fedsvrpg_m.fedsvrpg_m import FedSVRPGM
@@ -18,6 +18,7 @@ FEDERATE_ALGOS = {
 
     "fed_ampo_ppo" : FedAMPPO,
     "fed_ampo_local_ppo": FedAMPOLocalPPO,
+    "fed_ampo_group_ppo": FedAMPOGroupPPO,
     "ppo_avg" : PPOAvg,
     "fed_svrpg_m" : FedSVRPGM,
 }
@@ -40,4 +41,5 @@ __all__ = [
     "FedAMPOPPO",
     "FedSVRPGM",
     "FedAMPOLocalPPO",
+    "FedAMPOGroupPPO",
 ]
