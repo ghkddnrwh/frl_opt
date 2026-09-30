@@ -27,6 +27,7 @@ import rl_zoo3.register
 
 from rl_zoo3.algorithms.federate import FEDERATE_ALGOS
 from rl_zoo3.algorithms.protester import PROTESTER_ALGOS
+from rl_zoo3.algorithms.online import ONLINE_ALGOS
 
 from rl_zoo3.neurips2026.wd3 import WD3
 
@@ -50,6 +51,7 @@ ALGOS: dict[str, type[BaseAlgorithm]] = {
 
     **FEDERATE_ALGOS,
     **PROTESTER_ALGOS,
+    **ONLINE_ALGOS,
 
     "icml_d2mc": ICMLD2MC,
     "wd3": WD3,
