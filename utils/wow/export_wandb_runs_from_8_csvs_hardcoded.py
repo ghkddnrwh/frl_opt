@@ -1,16 +1,36 @@
-# export_wandb_runs_2026_09_11_hardcoded_old_style.py
+# export_wandb_runs_2026_09_30_80_hardcoded_old_style.py
 #
-# 2026-09-11 W&B CSV의 run ID를 직접 하드코딩한 exporter.
+# 2026-09-30에 제공된 2개 W&B CSV의 run ID를 직접 하드코딩한 exporter.
 # 실행 시 CSV 파일은 필요하지 않습니다.
 #
-# CSV rows: 85
-# Unique run IDs: 85
-# State counts: {'finished': 70, 'running': 10, 'crashed': 5}
+# 구성:
+#   PPO Avg       : 40 runs
+#   AMPO Uniform  : 40 runs
+#
+# 각 알고리즘:
+#   4 environments x 2 perturbations x 5 seeds = 40 runs
+#
+# Environments:
+#   Ant
+#   HalfCheetah
+#   Hopper
+#   Walker2d
+#
+# Perturbations:
+#   friction
+#   gravity
+#
+# Seeds:
+#   1, 2, 3, 4, 5
+#
+# Total CSV rows: 80
+# Unique run IDs: 80
+# State counts: finished 80
 #
 # Usage:
 #   pip install wandb
 #   wandb login
-#   python export_wandb_runs_2026_09_11_hardcoded_old_style.py
+#   python export_wandb_runs_2026_09_30_80_hardcoded_old_style.py
 
 import json
 import math
@@ -22,106 +42,54 @@ import wandb
 
 ENTITY = "ukjo19"
 PROJECT = "sb3"
-OUT_ROOT = "logs/wandb_logs_2026_09_11"
+OUT_ROOT = "logs/wandb_logs_2026_09_30_80"
 PAGE_SIZE = 500
 
 # True면 API 조회 시점에 finished인 run만 export
-# False면 CSV에 포함된 모든 run의 현재까지 로그를 export
+# False면 하드코딩된 모든 run의 현재까지 로그를 export
 ONLY_FINISHED = False
 
 
-SOURCE_FILE_METADATA = {'wandb_export_2026-09-11T13_43_38.917+09_00.csv': {'rows': 85,
-                                                    'run_ids': 85,
-                                                    'unique_run_ids': 85,
-                                                    'state_counts': {'finished': 70, 'running': 10, 'crashed': 5},
-                                                    'group_counts': {'ant_friction': 35, 'ant_gravity': 50}}}
+SOURCE_FILE_METADATA = {'wandb_export_2026-09-30T10_42_06.245+09_00.csv': {'algorithm': 'ppo_avg',
+                                                    'rows': 40,
+                                                    'run_ids': 40,
+                                                    'unique_run_ids': 40,
+                                                    'state_counts': {'finished': 40},
+                                                    'envs': ['PerturbAnt-v4',
+                                                             'PerturbHalfCheetah-v4',
+                                                             'PerturbHopper-v4',
+                                                             'PerturbWalker2d-v4'],
+                                                    'perturbations': ['friction', 'gravity'],
+                                                    'seeds': [1, 2, 3, 4, 5]},
+ 'wandb_export_2026-09-30T10_42_26.277+09_00.csv': {'algorithm': 'ampo_uniform',
+                                                    'rows': 40,
+                                                    'run_ids': 40,
+                                                    'unique_run_ids': 40,
+                                                    'state_counts': {'finished': 40},
+                                                    'envs': ['PerturbAnt-v4',
+                                                             'PerturbHalfCheetah-v4',
+                                                             'PerturbHopper-v4',
+                                                             'PerturbWalker2d-v4'],
+                                                    'perturbations': ['friction', 'gravity'],
+                                                    'seeds': [1, 2, 3, 4, 5]}}
 
 
-RUN_IDS_BY_GROUP = {'ant_friction': ['f28zs4lv',
-                  '23y13v46',
-                  'h8npgcqy',
-                  '402uf31e',
-                  'etlpas81',
-                  'ou0rh6tf',
-                  'djtninpi',
-                  'dszyhz2o',
-                  'dvsmrw60',
-                  'bstzx2nt',
-                  'bli50l87',
-                  'rq3l2kgw',
-                  '9qxlri3n',
-                  'tkrrfavo',
-                  '91y3ygr2',
-                  '5h4d24aa',
-                  'u00taxv3',
-                  '6xsvuja5',
-                  '1i6cnt64',
-                  'wqmggqvg',
-                  'ja3c3as0',
-                  'pygy749k',
-                  'dock5lrf',
-                  'hz9bsqmd',
-                  'x88852kl',
-                  '1ja51ty9',
-                  'wu1llop0',
-                  '8sjnxhao',
-                  'rdlwbqdb',
-                  'qompjwdz',
-                  'jwf8snum',
-                  '12vx94ul',
-                  '2885masn',
-                  'lw1n6s5o',
-                  '2qck97c6'],
- 'ant_gravity': ['8pf5kn0n',
-                 'sz0ev9xg',
-                 '0i9s22kc',
-                 'xa3jhcry',
-                 '4uqcxc7q',
-                 'px8klaqv',
-                 'hrtbq363',
-                 '8d0ohzt6',
-                 'on4eilez',
-                 'snafa5v1',
-                 'lu58dwm3',
-                 'hist6g6q',
-                 'xnvecfjq',
-                 '440zo275',
-                 'hpaufgz6',
-                 '0w8x8po5',
-                 '2jk92wj0',
-                 'mg720wy1',
-                 '1ds7ri80',
-                 'm1v6m64t',
-                 'fhw3xa97',
-                 'pm0z3znj',
-                 '21slmgxf',
-                 '22tt4g07',
-                 'u37wtyta',
-                 'bafbxve8',
-                 'uw0q3a6v',
-                 'wlsjahsq',
-                 '6qra1bqf',
-                 'ufdow4cb',
-                 'kuqgkcal',
-                 '2dki2zwo',
-                 'it7pu58h',
-                 'y55viycr',
-                 'lv53hx1r',
-                 'jr20o7yh',
-                 '3n78no1b',
-                 'izccf1lc',
-                 'oc8d9bhl',
-                 'txd9r951',
-                 'qe41rubq',
-                 'd3f5rvdk',
-                 'k7cxep04',
-                 '6avkzu2l',
-                 'kcosxef0',
-                 'xqimgnli',
-                 'glkpb52d',
-                 '6yin9imk',
-                 'm4zwwwhb',
-                 'wokyijat']}
+RUN_IDS_BY_GROUP = {'ppo_avg_ant_friction': ['2lhtmky5', 'rsrfv7j9', '9tk5k6b1', 'uxm5v0ce', 'izsdo2kq'],
+ 'ppo_avg_ant_gravity': ['l6xh08px', '8cp86nve', 'dklcpqmw', '3r8n1vw1', 'ym2ka1a8'],
+ 'ppo_avg_halfcheetah_friction': ['romrukff', 'ojvm6ghr', 'z6ouxp18', 'xbpccmmm', 'f4wope86'],
+ 'ppo_avg_halfcheetah_gravity': ['de5t6qpx', 'wnwiwctp', 'rstfh92g', 'csm42l4w', 'r953j4hj'],
+ 'ppo_avg_hopper_friction': ['wmyh9icx', 'ue3lzxlr', 'dc9c5ml8', 'hwnf1iag', 'uz6vbv19'],
+ 'ppo_avg_hopper_gravity': ['9yl4586d', 'm4ihon4k', 'dk4igffu', 'fpej6xep', 'iq0pof9c'],
+ 'ppo_avg_walker2d_friction': ['e80ul4fu', 'zj60trz9', 'rr5o5p72', 'qc44wgcu', 'ne2z2ewe'],
+ 'ppo_avg_walker2d_gravity': ['s043chqn', 'lc8qh7mx', 'tydtiexw', '9iqf7d8s', 'dl0l7e70'],
+ 'ampo_uniform_ant_friction': ['3q8ikuas', 'w9rvjtpz', 'v1pj1ijc', 'gpki0p99', 'zulb79wp'],
+ 'ampo_uniform_ant_gravity': ['h2qp0w51', 'f7y2eg2p', 'o1y1275o', 'qwk5km9t', 's93twjbh'],
+ 'ampo_uniform_halfcheetah_friction': ['fnjvgeku', '7nada33z', 'jmp10v33', 'e1zwv7ch', '3rk57z7s'],
+ 'ampo_uniform_halfcheetah_gravity': ['y06pq5xb', 'muqfi2ag', '8uvzpd75', 'l2f7xacr', 'df8vm5h9'],
+ 'ampo_uniform_hopper_friction': ['m584m67w', '4b27wsu0', 'bqn41uz5', 'ngnywo3o', 'lzavbamd'],
+ 'ampo_uniform_hopper_gravity': ['gbgpdvdf', '0d7cp0yd', 'bmo35z2q', '8jx5z67o', '4tsg2syr'],
+ 'ampo_uniform_walker2d_friction': ['wpgyjfsx', 'oap0z0l7', '259vewuf', 'a820twec', 'lxmd3rc4'],
+ 'ampo_uniform_walker2d_gravity': ['89mptaq1', 'bytdcy07', 'dk4l8bxn', 'k4gucsh3', 'r72o6w4o']}
 
 
 RUN_IDS = list(dict.fromkeys(
@@ -251,51 +219,15 @@ def export_run(run, out_root: Path):
     metadata = {
         "experiment_group": group,
         "api_path": api_path,
-        "entity": getattr(
-            run,
-            "entity",
-            None,
-        ),
-        "project": getattr(
-            run,
-            "project",
-            None,
-        ),
-        "id": getattr(
-            run,
-            "id",
-            None,
-        ),
-        "name": getattr(
-            run,
-            "name",
-            None,
-        ),
-        "state": getattr(
-            run,
-            "state",
-            None,
-        ),
-        "created_at": getattr(
-            run,
-            "created_at",
-            None,
-        ),
-        "url": getattr(
-            run,
-            "url",
-            None,
-        ),
-        "tags": getattr(
-            run,
-            "tags",
-            None,
-        ),
-        "notes": getattr(
-            run,
-            "notes",
-            None,
-        ),
+        "entity": getattr(run, "entity", None),
+        "project": getattr(run, "project", None),
+        "id": getattr(run, "id", None),
+        "name": getattr(run, "name", None),
+        "state": getattr(run, "state", None),
+        "created_at": getattr(run, "created_at", None),
+        "url": getattr(run, "url", None),
+        "tags": getattr(run, "tags", None),
+        "notes": getattr(run, "notes", None),
     }
 
     dump_json(
@@ -332,19 +264,12 @@ def export_run(run, out_root: Path):
             )
 
             n_rows += 1
-
-            all_keys.update(
-                row.keys()
-            )
+            all_keys.update(row.keys())
 
             if len(first_rows) < 5:
-                first_rows.append(
-                    row
-                )
+                first_rows.append(row)
 
-            last_rows.append(
-                row
-            )
+            last_rows.append(row)
 
             if len(last_rows) > 5:
                 last_rows.pop(0)
@@ -354,6 +279,7 @@ def export_run(run, out_root: Path):
         "# W&B Run Export",
         "",
         f"- Experiment group: `{group}`",
+        f"- Project: `{PROJECT}`",
         f"- API path: `{api_path}`",
         f"- Run name: `{getattr(run, 'name', None)}`",
         f"- Run id: `{run_id}`",
@@ -414,16 +340,8 @@ def export_run(run, out_root: Path):
     return {
         "id": run_id,
         "group": group,
-        "name": getattr(
-            run,
-            "name",
-            None,
-        ),
-        "state": getattr(
-            run,
-            "state",
-            None,
-        ),
+        "name": getattr(run, "name", None),
+        "state": getattr(run, "state", None),
         "history_rows": n_rows,
         "out_dir": str(out),
     }
@@ -442,13 +360,10 @@ def main():
     )
 
     print(
-        f"[INFO] unique runs: "
-        f"{len(RUN_IDS)}"
+        f"[INFO] unique runs: {len(RUN_IDS)}"
     )
 
-    for group, ids in (
-        RUN_IDS_BY_GROUP.items()
-    ):
+    for group, ids in RUN_IDS_BY_GROUP.items():
         print(
             f"  - {group}: "
             f"{len(ids)}"
@@ -499,8 +414,7 @@ def main():
                 and state != "finished"
             ):
                 print(
-                    f"    SKIP: "
-                    f"state={state}"
+                    f"    SKIP: state={state}"
                 )
 
                 skipped.append({
@@ -556,26 +470,16 @@ def main():
         {
             "entity": ENTITY,
             "project": PROJECT,
-            "unique_run_count": len(
-                RUN_IDS
-            ),
-            "only_finished": (
-                ONLY_FINISHED
-            ),
+            "unique_run_count": len(RUN_IDS),
+            "only_finished": ONLY_FINISHED,
             "expected_by_group": {
                 group: len(ids)
                 for group, ids
                 in RUN_IDS_BY_GROUP.items()
             },
-            "exported_count": len(
-                exported
-            ),
-            "skipped_count": len(
-                skipped
-            ),
-            "error_count": len(
-                errors
-            ),
+            "exported_count": len(exported),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
             "exported": exported,
             "skipped": skipped,
             "errors": errors,
